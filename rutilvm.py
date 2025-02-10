@@ -373,11 +373,11 @@ def show_virtual_machines(stdscr, connection):
         vms_service = connection.system_service().vms_service()
         hosts_service = connection.system_service().hosts_service()
         clusters_service = connection.system_service().clusters_service()
-        # 모든 호스트 정보를 리스트로 가져옵니다.
+        # 모든 호스트 정보를 리스트로 가져옴.
         hosts = hosts_service.list()
         # 호스트 id를 키로, 호스트 이름을 값으로 하는 딕셔너리 생성
         hosts_map = {host.id: host.name for host in hosts}
-        # 모든 VM 정보를 리스트로 가져옵니다.
+        # 모든 VM 정보를 리스트로 가져옴.
         vms = vms_service.list()
     except Exception as e:
         # 데이터 로딩에 실패하면 에러 메시지를 화면에 출력하고, 사용자의 입력을 기다린 후 함수를 종료.
@@ -2100,60 +2100,88 @@ def show_event_page(stdscr, connection, network):
     선택된 네트워크의 이벤트 페이지를 표시하며,
     해당 네트워크 + Data Center 정보를 기반으로 필터링한 이벤트를 출력.
     """
+    import time
+
     height, width = stdscr.getmaxyx()
     event_win = curses.newwin(height, width, 0, 0)
     event_win.clear()
-
-    # 이벤트 서비스에서 이벤트 가져오기
-    events_service = connection.system_service().events_service()
-    all_events = events_service.list(max=100)  # 최신 100개 이벤트 가져오기
 
     # 선택된 네트워크의 정보
     network_name = network.get("name", "-")
     network_id = network.get("id", "-")
     network_data_center = network.get("data_center", "-")
 
-    # 네트워크 및 Data Center와 관련된 이벤트 필터링
-    network_events = [
-        ev for ev in all_events
-        if ev.description and ("network" in ev.description.lower())
-        and (network_name in ev.description or network_id in ev.description)
-        and (network_data_center in ev.description)
-    ]
+    # 기존 이벤트를 저장할 리스트 (최대 200개까지만 유지)
+    network_events = []
+    MAX_EVENTS = 200  # 최대 200개의 이벤트만 유지
+
+    def fetch_events():
+        """ 새로운 이벤트를 가져와 기존 이벤트 리스트에 추가하되, 가장 오래된 이벤트를 삭제함 """
+        events_service = connection.system_service().events_service()
+        new_events = events_service.list(max=100)  # 최신 100개 이벤트 가져오기
+
+        # 필터링: 선택된 네트워크와 관련된 이벤트만 저장
+        filtered_events = [
+            ev for ev in new_events
+            if ev.description and ("network" in ev.description.lower())
+            and (network_name in ev.description or network_id in ev.description)
+            and (network_data_center in ev.description)
+        ]
+
+        # 기존 이벤트와 합치면서 중복 제거 (event.id 기준)
+        existing_event_ids = {ev.id for ev in network_events}
+        for event in filtered_events:
+            if event.id not in existing_event_ids:
+                network_events.append(event)
+
+        # 가장 최근 생성된 200개만 유지 (정렬 후 오래된 것 삭제)
+        network_events.sort(key=lambda x: x.time, reverse=True)  # 시간 기준 내림차순 정렬
+        if len(network_events) > MAX_EVENTS:
+            network_events[:] = network_events[:MAX_EVENTS]  # 최신 200개 유지
 
     # 페이지네이션 설정
     MAX_ROWS = 40  # 한 페이지에 표시할 최대 이벤트 개수
-    total_events = len(network_events)
-    max_page = max(1, (total_events + MAX_ROWS - 1) // MAX_ROWS)
     current_page = 1
 
     indent = " "  # 앞 공백 한 칸 유지
 
     def draw_event_page():
+        """ 이벤트 페이지를 다시 그리는 함수 """
         event_win.erase()
+        total_events = len(network_events)
+        max_page = max(1, (total_events + MAX_ROWS - 1) // MAX_ROWS)
+
         title = indent + f"- Event Page for {network_name} (Data Center: {network_data_center}) ({current_page}/{max_page})"
-        event_win.addstr(1, 0, title)  # 공백 한 칸 유지하여 출력
+        event_win.addstr(1, 0, title)
 
         # 테이블 헤더
         event_headers = ["Time", "Severity", "Description"]
-        event_widths = [19, 9, 91]  # 요청하신 대로 열 너비 설정
+        event_widths = [19, 9, 91]
 
         if total_events == 0:
-            # 이벤트가 없을 경우, `Severity`와 `Description` 열을 하나의 셀로 합침
             header_line = indent + "┌" + "─" * event_widths[0] + "┬" + "─" * event_widths[1] + "┬" + "─" * event_widths[2] + "┐"
-            divider_line = indent + "├" + "─" * event_widths[0] + "┴" + "─" * (event_widths[1] + event_widths[2] + 1) + "┤"
-            footer_line = indent + "└" + "─" * (sum(event_widths) + 4) + "┘"  # 오른쪽 정렬 수정
-
             event_win.addstr(3, 0, header_line)
-            event_win.addstr(4, 0, indent + "│" + f"{event_headers[0]:<{event_widths[0]}}" + "│" + f"{event_headers[1]:<{event_widths[1]}}" + "│" + f"{event_headers[2]:<{event_widths[2]}}" + "│")
+            
+            event_win.addstr(4, 0, indent + "│" + f"{event_headers[0]:<{event_widths[0]}}" + "│" + 
+                             f"{event_headers[1]:<{event_widths[1]}}" + "│" + 
+                             f"{event_headers[2]:<{event_widths[2]}}" + "│")
+        
+            divider_line = indent + "├" + "─" * event_widths[0] + "┴" + "─" * (event_widths[1] + event_widths[2] + 1) + "┤"
             event_win.addstr(5, 0, divider_line)
-            event_win.addstr(6, 0, indent + "│" + " No events found for this network.".ljust(sum(event_widths) + 2) + "│")  # 정렬 수정
+        
+            event_win.addstr(6, 0, indent + "│" + " No events found for this network.".ljust(sum(event_widths) + 2) + "│")
+        
+            # Footer 부분: divider_line과 정확히 정렬되도록 수정
+            footer_line = indent + "└" + "─" * event_widths[0] + "┴" + "─" * (event_widths[1] + event_widths[2] + 1) + "┘"
             event_win.addstr(7, 0, footer_line)
+
         else:
             header_line = indent + "┌" + "┬".join("─" * w for w in event_widths) + "┐"
             event_win.addstr(3, 0, header_line)
-            event_win.addstr(4, 0, indent + "│" + "│".join(f"{truncate_value(h, w):<{w}}" for h, w in zip(event_headers, event_widths)) + "│")
-            event_win.addstr(5, 0, indent + "├" + "┼".join("─" * w for w in event_widths) + "┤")
+            header_row = indent + "│" + "│".join(f"{h:<{w}}" for h, w in zip(event_headers, event_widths)) + "│"
+            event_win.addstr(4, 0, header_row)
+            divider_line = indent + "├" + "┼".join("─" * w for w in event_widths) + "┤"
+            event_win.addstr(5, 0, divider_line)
 
             start_idx = (current_page - 1) * MAX_ROWS
             end_idx = min(start_idx + MAX_ROWS, total_events)
@@ -2164,24 +2192,26 @@ def show_event_page(stdscr, connection, network):
                 message = event.description if event.description else "-"
 
                 row = [
-                    truncate_value(time_str, event_widths[0]),
-                    truncate_value(severity, event_widths[1]),
-                    truncate_value(message, event_widths[2])
+                    time_str[:event_widths[0]],
+                    severity[:event_widths[1]],
+                    message[:event_widths[2]]
                 ]
 
-                event_win.addstr(6 + i, 0, indent + "│" + "│".join(f"{col:<{w}}" for col, w in zip(row, event_widths)) + "│")
+                row_str = indent + "│" + "│".join(f"{col:<{w}}" for col, w in zip(row, event_widths)) + "│"
+                event_win.addstr(6 + i, 0, row_str)
 
-            event_win.addstr(6 + (end_idx - start_idx), 0, indent + "└" + "┴".join("─" * w for w in event_widths) + "┘")
+            bottom_line = indent + "└" + "┴".join("─" * w for w in event_widths) + "┘"
+            event_win.addstr(6 + (end_idx - start_idx), 0, bottom_line)
 
-        # `N=Next | P=Prev` 문구 위치 조정
+        # 'N=Next | P=Prev' 문구 위치
         event_win.addstr(8 if total_events == 0 else 7 + (end_idx - start_idx), 0, indent + "N=Next | P=Prev")  
-
-        # `ESC=Go back | Q=Quit` 문구 위치 조정 (화면 하단)
+        # 하단 안내 문구
         event_win.addstr(height - 2, 0, indent + "ESC=Go back | Q=Quit")
 
         event_win.refresh()
 
-    draw_event_page()
+    fetch_events()  # 처음 실행 시 이벤트 가져오기
+    draw_event_page()  # 이벤트 출력
 
     while True:
         key = event_win.getch()
@@ -2189,12 +2219,16 @@ def show_event_page(stdscr, connection, network):
             break
         elif key in (ord('q'), ord('Q')):  # 프로그램 종료
             exit(0)
-        elif key in (ord('n'), ord('N')) and current_page < max_page:  # 다음 페이지
+        elif key in (ord('n'), ord('N')) and current_page < (len(network_events) + MAX_ROWS - 1) // MAX_ROWS:
             current_page += 1
             draw_event_page()
-        elif key in (ord('p'), ord('P')) and current_page > 1:  # 이전 페이지
+        elif key in (ord('p'), ord('P')) and current_page > 1:
             current_page -= 1
             draw_event_page()
+        else:
+            fetch_events()  # 새로운 이벤트 가져오기
+            draw_event_page()  # 화면 업데이트
+            time.sleep(5)  # 5초마다 업데이트
 
 def show_event_page(stdscr, connection, network):
     """
@@ -2261,13 +2295,19 @@ def show_event_page(stdscr, connection, network):
 
         if total_events == 0:
             header_line = indent + "┌" + "─" * event_widths[0] + "┬" + "─" * event_widths[1] + "┬" + "─" * event_widths[2] + "┐"
-            divider_line = indent + "├" + "─" * event_widths[0] + "┴" + "─" * (event_widths[1] + event_widths[2] + 1) + "┤"
-            footer_line = indent + "└" + "─" * (sum(event_widths) + 4) + "┘"
-
             event_win.addstr(3, 0, header_line)
-            event_win.addstr(4, 0, indent + "│" + f"{event_headers[0]:<{event_widths[0]}}" + "│" + f"{event_headers[1]:<{event_widths[1]}}" + "│" + f"{event_headers[2]:<{event_widths[2]}}" + "│")
+            
+            event_win.addstr(4, 0, indent + "│" + f"{event_headers[0]:<{event_widths[0]}}" + "│" + 
+                             f"{event_headers[1]:<{event_widths[1]}}" + "│" + 
+                             f"{event_headers[2]:<{event_widths[2]}}" + "│")
+        
+            divider_line = indent + "├" + "─" * event_widths[0] + "┴" + "─" * (event_widths[1] + event_widths[2] + 1) + "┤"
             event_win.addstr(5, 0, divider_line)
+        
             event_win.addstr(6, 0, indent + "│" + " No events found for this network.".ljust(sum(event_widths) + 2) + "│")
+        
+            # Footer 부분: divider_line과 정확히 정렬되도록 수정
+            footer_line = indent + "└" + "─" * event_widths[0] + "┴" + "─" * (event_widths[1] + event_widths[2] + 1) + "┘"
             event_win.addstr(7, 0, footer_line)
         else:
             header_line = indent + "┌" + "┬".join("─" * w for w in event_widths) + "┐"
