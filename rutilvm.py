@@ -1,6 +1,6 @@
 #!/usr/bin/python3
 """
-date: 20250210
+date: 20250212
 RutilVM Assistor
 
 메뉴 항목 순서:
@@ -9,7 +9,7 @@ RutilVM Assistor
   3. Clusters
   4. Hosts
   5. Networks
-  6. Storage Domains     ← (추후 구현: placeholder)
+  6. Storage Domains
   7. Storage Disks       ← (추후 구현: placeholder)
   8. Users               ← (추후 구현: placeholder)
   9. Certificate         ← (추후 구현: placeholder)
@@ -39,9 +39,8 @@ from ovirtsdk4.types import Host, VmStatus, Ip, IpVersion  # oVirt SDK 타입
 from ovirtsdk4 import Connection, Error  # oVirt SDK 연결 및 오류 처리
 from requests.auth import HTTPBasicAuth  # HTTP 기본 인증
 import socket           # 네트워크 연결 확인
-import math
+import math             # 수학 관련 함수, 상수 등을 사용
 import ovirtsdk4.types as types  # oVirt SDK 타입 사용
-
 
 # HTTPS 경고 메시지 비활성화
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -50,16 +49,17 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 def truncate_with_ellipsis(value, max_width):
     """문자열의 길이가 max_width보다 길면 생략 부호(...)를 추가하여 잘라 반환"""
+    # value가 존재하면 문자열로 변환하고, 그렇지 않으면 "-" 문자열을 할당.
     value = str(value) if value else "-"
+    
+    # 문자열의 길이가 max_width보다 큰 경우
     if len(value) > max_width:
+        # max_width에서 2를 뺀 길이까지 자르고, 뒤에 ".."을 붙여 반환.
         return value[:max_width - 2] + ".."
+    
+    # 문자열 길이가 max_width 이내라면 원래 문자열을 그대로 반환.
     return value
-def truncate_value(value, max_width):
-    """문자열의 길이가 max_width보다 길면 생략 부호(...)를 추가하여 잘라 반환"""
-    value = str(value) if value else "-"
-    if len(value) > max_width:
-        return value[:max_width - 2] + ".."
-    return value
+
 
 def get_network_speed(interface):
     """
@@ -123,20 +123,31 @@ def draw_table(stdscr, start_y, headers, col_widths, data, row_func, current_row
     stdscr.addstr(start_y, 1, header_line)
     stdscr.addstr(start_y + 1, 1, "│" + "│".join(get_display_width(h, w) for h, w in zip(headers, col_widths)) + "│")
     stdscr.addstr(start_y + 2, 1, divider_line)
+    # 데이터 리스트가 비어 있는 경우, 빈 행을 출력.
     if not data:
+        # 데이터가 없을 때 각 열에 "-"를 표시하여 빈 행을 구성.
         empty_row = "│" + "│".join(get_display_width("-", w) for w in col_widths) + "│"
         stdscr.addstr(start_y + 3, 1, empty_row)
     else:
+        # 데이터가 있을 경우, 각 항목을 순회하며 테이블의 각 행을 출력.
         for idx, item in enumerate(data):
             row_y = start_y + 3 + idx
             row_data = [ensure_non_empty(d) for d in row_func(item)]
             row_text = "│" + "│".join(get_display_width(d, w) for d, w in zip(row_data, col_widths)) + "│"
+            # 현재 행이 강조되어야 하는 행(current_row)과 일치하는지 확인.
             if idx == current_row:
+                # 강조 색상을 적용하기 위해 color_pair(1)를 활성화.
                 stdscr.attron(curses.color_pair(1))
+                # 강조된 색상으로 해당 행을 출력.
                 stdscr.addstr(row_y, 1, row_text)
+                # 강조 색상을 해제.
                 stdscr.attroff(curses.color_pair(1))
             else:
+                # 강조 대상이 아닌 경우 일반 색상으로 행을 출력.
                 stdscr.addstr(row_y, 1, row_text)
+    
+    # 테이블 하단 경계선을 출력.
+    # 데이터가 없는 경우 최소 한 줄의 높이를 사용하여 footer 위치를 조정.
     stdscr.addstr(start_y + 3 + max(len(data), 1), 1, footer_line)
 
 def check_ip_reachable(ip, port=443, timeout=5):
@@ -388,7 +399,7 @@ def show_virtual_machines(stdscr, connection):
 
     # 한 페이지에 표시할 VM 행의 개수를 설정.
     rows_per_page = 20
-    # 전체 VM 개수를 기준으로 총 페이지 수를 계산합니다.
+    # 전체 VM 개수를 기준으로 총 페이지 수를 계산.
     total_pages = (len(vms) + rows_per_page - 1) // rows_per_page
     current_page = 0  # 현재 표시 중인 페이지 번호
     selected_vms = set()         # 사용자가 선택한 VM의 인덱스를 저장하는 집합
@@ -452,7 +463,7 @@ def show_virtual_machines(stdscr, connection):
             # 만약 해당 VM이 pending_start_vms 집합에 있다면, 상태 문자열에 추가 설명을 붙임
             if vm_index in pending_start_vms:
                 status += " (starting...)"
-            # VM의 호스트 이름을 매핑에서 가져옵니다. (호스트 정보가 없으면 "N/A")
+            # VM의 호스트 이름을 매핑에서 가져옴. (호스트 정보가 없으면 "N/A")
             host = hosts_map.get(vm.host.id, "N/A") if vm.host else "N/A"
             uptime = "N/A"
             # VM이 시작되었으면 현재 시간과 start_time의 차이로 업타임을 계산.
@@ -2081,13 +2092,7 @@ def show_host_events(stdscr, connection, host):
 # =============================================================================
 # Section 8: Networks Section
 # =============================================================================
-#def truncate_value(value, max_width):
-#    """문자열의 길이가 max_width보다 길면 생략 부호(...)를 추가하여 잘라 반환"""
-#    value = str(value) if value else "-"
-#    if len(value) > max_width:
-#        return value[:max_width - 2] + ".."
-#    return value
-#
+
 def parse_passthrough(val):
     """
     passthrough 값을 처리하여 "True" 또는 "False" 문자열을 반환.
@@ -2307,7 +2312,7 @@ def show_event_page(stdscr, connection, network):
             event_win.addstr(6, 0, indent + "│" + " No events found for this network.".ljust(sum(event_widths) + 2) + "│")
         
             # Footer 부분: divider_line과 정확히 정렬되도록 수정
-            footer_line = indent + "└" + "─" * event_widths[0] + "┴" + "─" * (event_widths[1] + event_widths[2] + 1) + "┘"
+            footer_line = indent + "└" + "─" * event_widths[0] + "─" + "─" * (event_widths[1] + event_widths[2] + 1) + "┘"
             event_win.addstr(7, 0, footer_line)
         else:
             header_line = indent + "┌" + "┬".join("─" * w for w in event_widths) + "┐"
@@ -2379,21 +2384,21 @@ def draw_screen(stdscr, network_info, selected_network_idx, vm_page, MAX_VM_ROWS
     net_widths = [22, 23, 27, 6, 8, 13, 14]
     try:
         stdscr.addstr(net_table_start, 0, indent + "┌" + "┬".join("─" * w for w in net_widths) + "┐")
-        stdscr.addstr(net_table_start + 1, 0, indent + "│" + "│".join(f"{truncate_value(h, w):<{w}}" for h, w in zip(net_headers, net_widths)) + "│")
+        stdscr.addstr(net_table_start + 1, 0, indent + "│" + "│".join(f"{truncate_with_ellipsis(h, w):<{w}}" for h, w in zip(net_headers, net_widths)) + "│")
         stdscr.addstr(net_table_start + 2, 0, indent + "├" + "┼".join("─" * w for w in net_widths) + "┤")
     except curses.error:
         pass
     for idx, net in enumerate(network_info):
         mtu_raw = net.get("mtu", 1500)
-        mtu_value = "Default(1500)" if mtu_raw == 1500 else truncate_value(str(mtu_raw), net_widths[5])
+        mtu_value = "Default(1500)" if mtu_raw == 1500 else truncate_with_ellipsis(str(mtu_raw), net_widths[5])
         row = [
-            truncate_value(net.get("name", "-"), net_widths[0]),
-            truncate_value(net.get("data_center", "-"), net_widths[1]),
-            truncate_value(net.get("description", "-"), net_widths[2]),
-            truncate_value(str(net.get("role", "-")).lower(), net_widths[3]),
-            truncate_value(str(net.get("vlan_tag", "-")), net_widths[4]),
-            truncate_value(mtu_value, net_widths[5]),
-            truncate_value(str(net.get("port_isolation", "-")), net_widths[6]),
+            truncate_with_ellipsis(net.get("name", "-"), net_widths[0]),
+            truncate_with_ellipsis(net.get("data_center", "-"), net_widths[1]),
+            truncate_with_ellipsis(net.get("description", "-"), net_widths[2]),
+            truncate_with_ellipsis(str(net.get("role", "-")).lower(), net_widths[3]),
+            truncate_with_ellipsis(str(net.get("vlan_tag", "-")), net_widths[4]),
+            truncate_with_ellipsis(mtu_value, net_widths[5]),
+            truncate_with_ellipsis(str(net.get("port_isolation", "-")), net_widths[6]),
         ]
         try:
             color = curses.color_pair(1) if idx == selected_network_idx else 0
@@ -2418,7 +2423,7 @@ def draw_screen(stdscr, network_info, selected_network_idx, vm_page, MAX_VM_ROWS
     vnic_widths = [14, 13, 19, 21, 14, 11, 21]
     try:
         stdscr.addstr(vnic_table_start, 0, indent + "┌" + "┬".join("─" * w for w in vnic_widths) + "┐")
-        stdscr.addstr(vnic_table_start + 1, 0, indent + "│" + "│".join(f"{truncate_value(h, w):<{w}}" for h, w in zip(vnic_headers, vnic_widths)) + "│")
+        stdscr.addstr(vnic_table_start + 1, 0, indent + "│" + "│".join(f"{truncate_with_ellipsis(h, w):<{w}}" for h, w in zip(vnic_headers, vnic_widths)) + "│")
         stdscr.addstr(vnic_table_start + 2, 0, indent + "├" + "┼".join("─" * w for w in vnic_widths) + "┤")
     except curses.error:
         pass
@@ -2465,7 +2470,7 @@ def draw_screen(stdscr, network_info, selected_network_idx, vm_page, MAX_VM_ROWS
             failover = getattr(failover_obj, "name", "-") if failover_obj else "-"
             row = [name, network_name, dc_name, net_filter, port_mirroring, passthrough, failover]
         try:
-            stdscr.addstr(vnic_row_start + idx, 0, indent + "│" + "│".join(f"{truncate_value(col, w):<{w}}" for col, w in zip(row, vnic_widths)) + "│")
+            stdscr.addstr(vnic_row_start + idx, 0, indent + "│" + "│".join(f"{truncate_with_ellipsis(col, w):<{w}}" for col, w in zip(row, vnic_widths)) + "│")
         except curses.error:
             pass
     try:
@@ -2490,7 +2495,7 @@ def draw_screen(stdscr, network_info, selected_network_idx, vm_page, MAX_VM_ROWS
     vm_widths = [22, 23, 16, 21, 12, 20]
     try:
         stdscr.addstr(vm_table_start, 0, indent + "┌" + "┬".join("─" * w for w in vm_widths) + "┐")
-        stdscr.addstr(vm_table_start + 1, 0, indent + "│" + "│".join(f"{truncate_value(h, w):<{w}}" for h, w in zip(vm_headers, vm_widths)) + "│")
+        stdscr.addstr(vm_table_start + 1, 0, indent + "│" + "│".join(f"{truncate_with_ellipsis(h, w):<{w}}" for h, w in zip(vm_headers, vm_widths)) + "│")
         stdscr.addstr(vm_table_start + 2, 0, indent + "├" + "┼".join("─" * w for w in vm_widths) + "┤")
     except curses.error:
         pass
@@ -2510,12 +2515,12 @@ def draw_screen(stdscr, network_info, selected_network_idx, vm_page, MAX_VM_ROWS
     vm_row_start = vm_table_start + 3
     for idx, vm in enumerate(vms_to_display):
         row = [
-            truncate_value(vm.get("vm_name", "-"), vm_widths[0]),
-            truncate_value(vm.get("cluster", "-"), vm_widths[1]),
-            truncate_value(vm.get("ip", "-"), vm_widths[2]),
-            truncate_value(vm.get("host_name", "-"), vm_widths[3]),
-            truncate_value(vm.get("vnic_status", "-"), vm_widths[4]),
-            truncate_value(vm.get("vnic", "-"), vm_widths[5])
+            truncate_with_ellipsis(vm.get("vm_name", "-"), vm_widths[0]),
+            truncate_with_ellipsis(vm.get("cluster", "-"), vm_widths[1]),
+            truncate_with_ellipsis(vm.get("ip", "-"), vm_widths[2]),
+            truncate_with_ellipsis(vm.get("host_name", "-"), vm_widths[3]),
+            truncate_with_ellipsis(vm.get("vnic_status", "-"), vm_widths[4]),
+            truncate_with_ellipsis(vm.get("vnic", "-"), vm_widths[5])
         ]
         try:
             stdscr.addstr(vm_row_start + idx, 0, indent + "│" + "│".join(f"{col:<{w}}" for col, w in zip(row, vm_widths)) + "│")
@@ -2653,20 +2658,454 @@ def show_networks(stdscr, connection):
 
 
 # =============================================================================
-# Section 9: Storage Domains Section (Placeholder)
+# Section 9: Storage Domains Section (Revised Layout)
 # =============================================================================
+
+def format_status_from_data_center(data_centers_service, domain):
+    """Data Center 정보를 기반으로 Cross Data Center Status를 결정"""
+    # 모든 데이터 센터 목록을 조회.
+    data_centers = data_centers_service.list()
+    for data_center in data_centers:
+        # 각 데이터 센터에 해당하는 서비스 인스턴스를 얻음.
+        data_center_service = data_centers_service.data_center_service(data_center.id)
+        # 현재 데이터 센터의 스토리지 도메인 목록을 조회.
+        storage_domains = data_center_service.storage_domains_service().list()
+        for storage_domain in storage_domains:
+            # 입력받은 domain과 같은 id를 가진 스토리지 도메인을 찾으면...
+            if storage_domain.id == domain.id:
+                # 스토리지 도메인이 'unattached' 상태이면 "-"를 반환.
+                if storage_domain.status == "unattached" or getattr(domain, "external_status", "") == "unattached":
+                    return "-"
+                # 그 외에는 상태를 문자열로 변환하여 첫 글자만 대문자로 반환.
+                return str(storage_domain.status).capitalize()
+    # domain 객체의 추가 속성에 따라 상태를 "-"로 간주.
+    if getattr(domain, "external_status", "") == "unattached" or getattr(domain, "master", True) is False:
+        return "-"
+    return "-"
+
+def format_gb(size_in_bytes):
+    """바이트를 GB로 변환하여 반환"""
+    # size_in_bytes 값이 있을 경우 GB 단위로 변환하여 소수점 둘째 자리까지 반올림,
+    # 값이 없으면 "-" 문자열을 반환.
+    return round(size_in_bytes / (1024 ** 3), 2) if size_in_bytes else "-"
+
+def format_date(date_obj):
+    """datetime 객체를 문자열로 변환"""
+    # datetime 객체가 존재하면 지정된 포맷으로 문자열화하고, 없으면 "-" 반환
+    if date_obj:
+        return date_obj.strftime("%Y-%m-%d %H:%M:%S")
+    return "-"
+
+def fetch_storage_domains_data(connection):
+    """
+    기존 연결(connection)을 이용하여 스토리지 도메인, 디스크, 그리고 VM 정보를
+    한 번씩 조회한 후, 각 디스크에 연결된 VM 정보를 매핑하여 속도를 개선.
+    """
+    # 시스템 서비스에서 스토리지 도메인, 데이터 센터, 디스크, 그리고 VM 서비스를 가져옴.
+    system_service = connection.system_service()
+    storage_domains_service = system_service.storage_domains_service()
+    data_centers_service = system_service.data_centers_service()
+
+    # 스토리지 도메인과 데이터 센터 목록 조회
+    storage_domains = storage_domains_service.list()
+    # 데이터 센터 ID를 키로 하고, 이름을 값으로 하는 딕셔너리를 생성.
+    data_centers = {dc.id: dc.name for dc in data_centers_service.list()}
+
+    storage_info = {}
+    for domain in storage_domains:
+        # 각 스토리지 도메인에 연결된 데이터 센터 이름을 초기값 "-"로 설정.
+        data_center_name = "-"
+        # 도메인에 _data_centers 속성이 존재하고 값이 있다면 첫 번째 데이터 센터의 이름을 사용.
+        if hasattr(domain, "_data_centers") and domain._data_centers:
+            first_data_center = domain._data_centers[0]
+            data_center_id = first_data_center.id
+            data_center_name = data_centers.get(data_center_id, "-")
+
+        # 데이터 센터의 스토리지 도메인 상태를 결정.
+        cross_data_center_status = format_status_from_data_center(data_centers_service, domain)
+        # 사용 가능한 공간과 사용 중인 공간을 가져와 총 공간을 계산.
+        available_space = getattr(domain, 'available', 0) or 0
+        used_space = getattr(domain, 'used', 0) or 0
+        total_space = available_space + used_space
+
+        # 각 스토리지 도메인에 대한 상세 정보를 딕셔너리에 저장.
+        storage_info[domain.name] = {
+            'id': domain.id,
+            'type': domain.type,
+            'storage_type': getattr(domain.storage, 'type', '-') if getattr(domain, 'storage', None) else '-',
+            'cross_data_center_status': cross_data_center_status,
+            'data_center': data_center_name,
+            'total_space': format_gb(total_space),
+            'free_space': format_gb(available_space),
+            'properties': vars(domain),
+            'disks': []  # 이후 디스크 정보를 채워 넣기 위한 빈 리스트
+        }
+
+    # --- VM, 디스크, 연결 정보를 한 번만 조회하도록 변경 --- #
+    # 디스크와 VM 서비스를 통해 모든 디스크와 VM 목록을 조회.
+    disks_service = system_service.disks_service()
+    vms_service = system_service.vms_service()
+    disks = disks_service.list()
+    vms = vms_service.list()
+
+    # 각 VM의 디스크 연결 정보를 조회하여, disk id를 키로 하고 연결된 VM 리스트를 값으로 하는 매핑을 생성.
+    disk_to_vms = {}
+    vm_creation_dates = {}
+    vm_templates = {}
+    for vm in vms:
+        # 각 VM의 생성일과 템플릿 정보를 저장.
+        vm_creation_dates[vm.id] = format_date(vm.creation_time) if hasattr(vm, 'creation_time') else "-"
+        vm_templates[vm.id] = vm.original_template.name if getattr(vm, 'original_template', None) else "-"
+        # 개별 VM 서비스 인스턴스를 가져와 디스크 첨부 정보를 조회.
+        vm_service = vms_service.vm_service(vm.id)
+        attachments = vm_service.disk_attachments_service().list()
+        for attachment in attachments:
+            disk_id = attachment.disk.id
+            if disk_id not in disk_to_vms:
+                disk_to_vms[disk_id] = []
+            disk_to_vms[disk_id].append(vm)
+
+    # 조회된 디스크별로 매핑된 VM 정보를 스토리지 도메인 정보에 추가.
+    for disk in disks:
+        # 현재 디스크에 연결된 VM 목록을 가져옴.
+        attached_vms = disk_to_vms.get(disk.id, [])
+        # 디스크가 속한 각 스토리지 도메인을 찾아 해당 도메인의 디스크 리스트에 추가.
+        for sd in disk.storage_domains:
+            domain_name = next((name for name, info in storage_info.items() if info['id'] == sd.id), None)
+            if domain_name:
+                storage_info[domain_name]['disks'].append({
+                    'vm_name': ', '.join(vm.name for vm in attached_vms if vm.name) if attached_vms else "-",
+                    'disk_name': disk.name if disk.name else "-",
+                    'disk_size_gb': format_gb(getattr(disk, 'provisioned_size', None)),
+                    'actual_size_gb': format_gb(getattr(disk, 'actual_size', None)),
+                    'creation_date': ', '.join(vm_creation_dates.get(vm.id, "-") for vm in attached_vms) if attached_vms else "-",
+                    'template': ', '.join(vm_templates.get(vm.id) or "-" for vm in attached_vms) if attached_vms else "-",
+                    'allocation_policy': "Thin" if disk.sparse else "Preallocated",
+                    'status': str(disk.status) if disk.status else "-",
+                    'type': str(getattr(disk, 'storage_type', '-'))
+                })
+
+    return storage_info
+
+def fetch_data_centers_status(connection):
+    """
+    각 데이터 센터의 스토리지 도메인 상태를 조회하여,
+    데이터 센터 이름과 상태를 dict로 반환.
+    (전체 목록 대신, 추후 선택한 스토리지 도메인의 data_center를 참조하여 사용)
+    """
+    # 시스템 서비스에서 데이터 센터 관련 서비스를 가져옴.
+    system_service = connection.system_service()
+    data_centers_service = system_service.data_centers_service()
+    data_center_status = {}
+    # 모든 데이터 센터에 대해 반복하며 각 도메인의 상태를 조회.
+    for dc in data_centers_service.list():
+        dc_service = data_centers_service.data_center_service(dc.id)
+        domains = dc_service.storage_domains_service().list()
+        # 각 스토리지 도메인의 상태를 대문자로 변환한 리스트를 생성.
+        statuses = [str(domain.status).capitalize() for domain in domains if domain.status]
+        if statuses:
+            # 하나라도 "Active" 상태가 있으면 데이터 센터 상태를 "Active"로 간주.
+            if "Active" in statuses:
+                dc_status = "Active"
+            else:
+                dc_status = statuses[0]
+        else:
+            dc_status = "-"
+        data_center_status[dc.name] = dc_status
+    return data_center_status
+
+def draw_storage_domain_list(stdscr, storage_domains, current_idx, storage_info, start_y):
+    stdscr.addstr(start_y, 1, "- Storage Domain List")  # 스토리지 도메인 목록 제목 출력
+    table_start = start_y + 1
+    # 테이블 헤더와 각 열의 너비를 정의.
+    headers = ["Domain Name", "Domain Type", "Storage Type", "Cross Data Center Status", 
+               "Total Space(GB)", "Free Space(GB)", "Data Center"]
+    widths = [24, 12, 12, 25, 15, 15, 12]
+    # 테이블의 상단, 구분선, 하단 경계선을 생성.
+    header_line = "┌" + "┬".join("─" * w for w in widths) + "┐"
+    divider_line = "├" + "┼".join("─" * w for w in widths) + "┤"
+    footer_line = "└" + "┴".join("─" * w for w in widths) + "┘"
+    stdscr.addstr(table_start, 1, header_line, curses.color_pair(2))
+    stdscr.addstr(table_start + 1, 1,
+                  "│" + "│".join(f"{truncate_with_ellipsis(h, w):<{w}}" for h, w in zip(headers, widths)) + "│", curses.color_pair(2))
+    stdscr.addstr(table_start + 2, 1, divider_line, curses.color_pair(2))
+    # 스토리지 도메인 리스트의 각 항목을 순서대로 출력.
+    for idx, domain in enumerate(storage_domains):
+        info = storage_info[domain]
+        row = [
+            truncate_with_ellipsis(domain, widths[0]),
+            truncate_with_ellipsis(str(info['type']), widths[1]),
+            truncate_with_ellipsis(str(info['storage_type']), widths[2]),
+            truncate_with_ellipsis(info['cross_data_center_status'], widths[3]),
+            truncate_with_ellipsis(str(info['total_space']), widths[4]),
+            truncate_with_ellipsis(str(info['free_space']), widths[5]),
+            truncate_with_ellipsis(info['data_center'], widths[6])
+        ]
+        row_text = "│" + "│".join(f"{col:<{w}}" for col, w in zip(row, widths)) + "│"
+        # 현재 선택된 항목은 색상을 달리하여 하이라이트함.
+        if idx == current_idx:
+            stdscr.addstr(table_start + 3 + idx, 1, row_text, curses.color_pair(1))
+        else:
+            stdscr.addstr(table_start + 3 + idx, 1, row_text, curses.color_pair(2))
+    last_row = table_start + 3 + len(storage_domains)
+    stdscr.addstr(last_row, 1, footer_line, curses.color_pair(2))
+    return last_row + 1  # 다음 출력 위치(y 좌표)를 반환
+
+def draw_selected_data_center_table(stdscr, selected_domain, storage_info, data_centers_status, start_y):
+    """
+    - 선택한 스토리지 도메인이 속한 데이터 센터의 정보를 표시하는 테이블.
+    """
+    # 제목 출력
+    stdscr.addstr(start_y, 0, " " + "- Data Center (for selected Storage Domain)")
+    table_start = start_y + 1
+
+    # 헤더 및 열 너비 설정
+    headers = ["Name", "Domain status in Data Center"]
+    widths = [24, 96]  # 열 너비를 [24, 96]으로 지정
+    header_line = "┌" + "┬".join("─" * w for w in widths) + "┐"
+    divider_line = "├" + "┼".join("─" * w for w in widths) + "┤"
+    footer_line = "└" + "┴".join("─" * w for w in widths) + "┘"
+
+    # 테이블 상단 경계선과 헤더 행을 출력.
+    stdscr.addstr(table_start, 0, " " + header_line)
+    stdscr.addstr(table_start + 1, 0, " " + "│" + "│".join(f"{truncate_with_ellipsis(h, w):<{w}}" for h, w in zip(headers, widths)) + "│")
+    stdscr.addstr(table_start + 2, 0, " " + divider_line)
+    
+    # 선택된 스토리지 도메인에 연결된 데이터 센터 이름과 상태를 가져와 한 행으로 출력.
+    dc_name = storage_info[selected_domain].get("data_center", "-")
+    dc_status = data_centers_status.get(dc_name, "-")
+    data_row = "│" + "│".join([
+        f"{truncate_with_ellipsis(dc_name, widths[0]):<{widths[0]}}",
+        f"{truncate_with_ellipsis(dc_status, widths[1]):<{widths[1]}}"
+    ]) + "│"
+    stdscr.addstr(table_start + 3, 0, " " + data_row)
+    
+    stdscr.addstr(table_start + 4, 0, " " + footer_line)
+    return table_start + 5  # 다음 출력 위치 반환
+
+def draw_virtual_machines_table(stdscr, selected_domain, storage_info, vm_page, vm_page_size, start_y):
+    """
+    - Virtual Machines (디스크) 테이블을 페이지 단위로 그림.
+    """
+    # 선택된 스토리지 도메인에 속한 디스크 리스트를 가져옴.
+    disks = storage_info[selected_domain]["disks"]
+    total_disks = len(disks)
+    # 총 페이지 수를 계산 (최소 1페이지)
+    total_pages = max(1, (total_disks + vm_page_size - 1) // vm_page_size)
+    if vm_page >= total_pages:
+        vm_page = total_pages - 1
+    header_text = f"- Virtual Machines ({vm_page+1}/{total_pages})"
+    stdscr.addstr(start_y, 0, " " + header_text)
+    table_start = start_y + 1
+    # 디스크 정보를 출력할 테이블 헤더와 열 너비를 설정함.
+    detail_headers = ["Virtual Machines", "Disk", "Size(GB)", "Actual Size(GB)", "Creation Date", "Template"]
+    detail_widths = [24, 37, 8, 15, 20, 12]
+    header_line = "┌" + "┬".join("─" * w for w in detail_widths) + "┐"
+    divider_line = "├" + "┼".join("─" * w for w in detail_widths) + "┤"
+    footer_line = "└" + "┴".join("─" * w for w in detail_widths) + "┘"
+    stdscr.addstr(table_start, 0, " " + header_line)
+    stdscr.addstr(table_start + 1, 0,
+                  " " + "│" + "│".join(f"{truncate_with_ellipsis(h, w):<{w}}" for h, w in zip(detail_headers, detail_widths)) + "│")
+    stdscr.addstr(table_start + 2, 0, " " + divider_line)
+    # 현재 페이지에 해당하는 디스크 목록의 시작과 끝 인덱스를 계산함.
+    start_index = vm_page * vm_page_size
+    end_index = start_index + vm_page_size
+    page_disks = disks[start_index:end_index]
+    row_y = table_start + 3
+
+    if page_disks:
+        # 각 디스크 정보를 테이블의 한 행으로 출력함.
+        for disk in page_disks:
+            row = [
+                truncate_with_ellipsis(disk.get("vm_name", "-"), detail_widths[0]),
+                truncate_with_ellipsis(disk.get("disk_name", "-"), detail_widths[1]),
+                truncate_with_ellipsis(str(disk.get("disk_size_gb", "-")), detail_widths[2]),
+                truncate_with_ellipsis(str(disk.get("actual_size_gb", "-")), detail_widths[3]),
+                truncate_with_ellipsis(disk.get("creation_date", "-"), detail_widths[4]),
+                truncate_with_ellipsis(disk.get("template", "-"), detail_widths[5])
+            ]
+            row_text = "│" + "│".join(f"{col:<{w}}" for col, w in zip(row, detail_widths)) + "│"
+            stdscr.addstr(row_y, 0, " " + row_text)
+            row_y += 1
+    else:
+        # 데이터가 없을 경우 각 열에 "-"만 출력하도록 처리함.
+        empty_row = "│" + "│".join(f"{'-':<{w}}" for w in detail_widths) + "│"
+        stdscr.addstr(row_y, 0, " " + empty_row)
+        row_y += 1
+
+    stdscr.addstr(row_y, 0, " " + footer_line)
+    row_y += 1
+    stdscr.addstr(row_y, 0, " " + "N=Next | P=Prev")
+    return row_y + 1  # 다음 출력 위치 반환
+
+def show_storage_domain_details(stdscr, domain_name, domain_info):
+    """
+    세부 디스크 정보를 페이징 처리하여 출력.
+    - 헤더에 "- Details for <domain_name> (Page X/Y)"를 표시하고,
+    - 테이블은 제목행을 제외하고 페이지 당 최대 40행의 디스크 정보를 보여줌.
+      (해당 페이지에 출력할 데이터 행이 40개 미만이면, 실제 데이터 행만 출력하며,
+       데이터가 하나도 없으면 각 셀에 단일 "-"만 보이게 함.)
+    - 테이블 하단에는 "N=Next | P=Prev" 문구를, 터미널 맨 아래에는 "ESC=Go back | Q=Quit" 문구를 표시.
+    """
+    curses.curs_set(0)
+    page = 0
+    page_size = 40  # 한 페이지에 표시할 디스크 정보 행 수
+    disks = domain_info.get("disks", [])
+    total_disks = len(disks)
+    total_pages = max(1, (total_disks + page_size - 1) // page_size)
+    
+    while True:
+        stdscr.erase()
+        # 헤더를 출력 (현재 페이지 정보 포함)
+        header_text = f"- Details for {domain_name} (Page {page+1}/{total_pages})"
+        stdscr.addstr(1, 0, " " + header_text)
+        stdscr.clrtoeol()
+
+        # 테이블 헤더와 각 열의 너비를 설정함.
+        detail_headers = ["Disk Name", "Virtual Size(GB)", "Actual Size(GB)", "Allocation Policy", "Storage Domain", "Status", "Type"]
+        detail_widths = [32, 16, 15, 17, 17, 9, 9]
+        header_line = "┌" + "┬".join("─" * w for w in detail_widths) + "┐"
+        divider_line = "├" + "┼".join("─" * w for w in detail_widths) + "┤"
+        footer_line = "└" + "┴".join("─" * w for w in detail_widths) + "┘"
+        
+        # 테이블 상단 경계선과 헤더 행을 출력함.
+        stdscr.addstr(2, 0, " " + header_line)
+        stdscr.clrtoeol()
+        stdscr.addstr(3, 0, " " + "│" + "│".join(f"{truncate_with_ellipsis(h, w):<{w}}" 
+                                                 for h, w in zip(detail_headers, detail_widths)) + "│")
+        stdscr.clrtoeol()
+        stdscr.addstr(4, 0, " " + divider_line)
+        stdscr.clrtoeol()
+        
+        # 현재 페이지에 해당하는 디스크 정보의 시작과 끝 인덱스를 계산함.
+        start_index = page * page_size
+        end_index = start_index + page_size
+        page_disks = disks[start_index:end_index]
+        y = 5
+        if page_disks:
+            # 각 디스크의 정보를 테이블의 한 행으로 출력함.
+            for disk in page_disks:
+                row = [
+                    truncate_with_ellipsis(disk.get("disk_name", "-"), detail_widths[0]),
+                    truncate_with_ellipsis(str(disk.get("disk_size_gb", "-")), detail_widths[1]),
+                    truncate_with_ellipsis(str(disk.get("actual_size_gb", "-")), detail_widths[2]),
+                    truncate_with_ellipsis(disk.get("allocation_policy", "-"), detail_widths[3]),
+                    truncate_with_ellipsis(domain_name, detail_widths[4]),
+                    truncate_with_ellipsis(str(disk.get("status", "-")), detail_widths[5]),
+                    truncate_with_ellipsis(str(disk.get("type", "-")), detail_widths[6])
+                ]
+                row_text = "│" + "│".join(f"{col:<{w}}" for col, w in zip(row, detail_widths)) + "│"
+                stdscr.addstr(y, 0, " " + row_text)
+                stdscr.clrtoeol()
+                y += 1
+        else:
+            # 데이터가 없으면 각 셀에 "-"만 출력함.
+            empty_row = "│" + "│".join(f"{'-':<{w}}" for w in detail_widths) + "│"
+            stdscr.addstr(y, 0, " " + empty_row)
+            stdscr.clrtoeol()
+            y += 1
+
+        stdscr.addstr(y, 0, " " + footer_line)
+        stdscr.clrtoeol()
+        y += 1
+        stdscr.addstr(y, 0, " " + "N=Next | P=Prev")
+        stdscr.clrtoeol()
+        y += 1
+        
+        # 남은 터미널 영역을 공백으로 채우고, 하단에 제어 문구를 출력함.
+        height, width = stdscr.getmaxyx()
+        for line in range(y, height - 1):
+            stdscr.addstr(line, 0, " " * width)
+        stdscr.addstr(height - 1, 0, " " + "ESC=Go back | Q=Quit")
+        stdscr.clrtoeol()
+        
+        stdscr.noutrefresh()
+        curses.doupdate()
+        
+        # 사용자 입력에 따라 페이지 이동 또는 상세보기 종료를 처리함.
+        key = stdscr.getch()
+        if key in (ord('n'), ord('N')):
+            page = (page + 1) % total_pages
+        elif key in (ord('p'), ord('P')):
+            page = (page - 1) % total_pages
+        elif key in (27, ord('q'), ord('Q')):
+            break
+
+def main_loop(stdscr, storage_domains, storage_info, data_centers_status):
+    # 컬러 모드를 초기화하고, 색상 쌍을 설정함.
+    curses.start_color()
+    curses.init_pair(1, curses.COLOR_BLACK, curses.COLOR_CYAN)
+    curses.init_pair(2, curses.COLOR_WHITE, curses.COLOR_BLACK)
+
+    curses.curs_set(0)  # 커서를 숨깁.
+    vm_page = 0
+    vm_page_size = 10  # VM 테이블에 한 페이지당 표시할 행 수
+    current_idx = 0  # 현재 선택된 스토리지 도메인의 인덱스
+    while True:
+        stdscr.erase()
+        y = 1
+        # 메인 제목을 출력함.
+        stdscr.addstr(y, 1, "Storage Domains", curses.color_pair(2) | curses.A_BOLD)
+        y += 2
+        # 스토리지 도메인 목록 테이블을 출력함.
+        y = draw_storage_domain_list(stdscr, storage_domains, current_idx, storage_info, y)
+        y += 1
+        # 현재 선택된 스토리지 도메인을 가져와 해당 데이터 센터 정보를 출력함.
+        selected_domain = storage_domains[current_idx]
+        y = draw_selected_data_center_table(stdscr, selected_domain, storage_info, data_centers_status, y)
+        y += 1
+        # 선택된 도메인에 속한 VM(디스크) 정보를 페이지 단위로 출력함.
+        y = draw_virtual_machines_table(stdscr, selected_domain, storage_info, vm_page, vm_page_size, y)
+        y += 1
+        height, width = stdscr.getmaxyx()
+        nav_text = " ▲/▼=Navigate | Enter=View Disks Details | ESC=Go back | Q=Quit"
+        stdscr.addstr(height - 1, 0, nav_text, curses.color_pair(2))
+        stdscr.noutrefresh()
+        curses.doupdate()
+        # 사용자 입력에 따라 메뉴 내 항목 선택, 페이지 이동, 상세보기 진입 등을 처리함.
+        key = stdscr.getch()
+        if key == curses.KEY_UP:
+            current_idx = (current_idx - 1) % len(storage_domains)
+            vm_page = 0
+        elif key == curses.KEY_DOWN:
+            current_idx = (current_idx + 1) % len(storage_domains)
+            vm_page = 0
+        elif key in (ord('n'), ord('N')):
+            disks = storage_info[storage_domains[current_idx]]["disks"]
+            total_pages_vm = max(1, (len(disks) + vm_page_size - 1) // vm_page_size)
+            vm_page = (vm_page + 1) % total_pages_vm
+        elif key in (ord('p'), ord('P')):
+            disks = storage_info[storage_domains[current_idx]]["disks"]
+            total_pages_vm = max(1, (len(disks) + vm_page_size - 1) // vm_page_size)
+            vm_page = (vm_page - 1) % total_pages_vm
+        elif key in (ord('\n'), 10, 13):
+            # Enter 키를 누르면 선택된 스토리지 도메인의 상세 디스크 정보를 보여줌.
+            domain_name = storage_domains[current_idx]
+            show_storage_domain_details(stdscr, domain_name, storage_info[domain_name])
+        elif key in (27,):
+            break
+        elif key in (ord('q'), ord('Q')):
+            sys.exit(0)
 
 def show_storage_domains(stdscr, connection):
     """
-    [Placeholder]
-    Storage Domains 관련 기능 미구현.
-    이곳에 향후 Storage Domains 관련 코드를 채워 넣을 예정.
+    메인 메뉴에서 'Storage Domains' 선택 시 실행되는 화면 함수.
+    - oVirt API를 통해 스토리지 도메인, 디스크, VM 정보를 조회하고,
+    - 각 스토리지 도메인의 정보와 함께, 선택한 도메인이 속한 Data Center의 정보를 별도 테이블로 출력.
+    - 마지막에 main_loop()를 호출하여 키 입력에 따라 화면 전환 및 상세보기 기능을 제공.
     """
-    stdscr.erase()
-    stdscr.addstr(1, 1, "Storage Domains functionality is not yet implemented.", curses.A_BOLD)
-    stdscr.addstr(3, 1, "Press any key to go back.")
-    stdscr.refresh()
-    stdscr.getch()
+    # API를 통해 스토리지 도메인 관련 데이터들을 가져옴.
+    storage_info = fetch_storage_domains_data(connection)
+    storage_domains = list(storage_info.keys())
+    if not storage_domains:
+        stdscr.clear()
+        stdscr.addstr(0, 0, " " + "No storage domains found. Press any key to go back.")
+        stdscr.getch()
+        return
+    # 데이터 센터의 상태 정보를 조회함.
+    data_centers_status = fetch_data_centers_status(connection)
+    # 메인 루프에 진입하여 사용자와 상호작용.
+    main_loop(stdscr, storage_domains, storage_info, data_centers_status)
 
 # =============================================================================
 # Section 10: Storage Disks Section (Placeholder)
