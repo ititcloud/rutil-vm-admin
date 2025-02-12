@@ -1,6 +1,6 @@
 #!/usr/bin/python3
 """
-date: 20250212
+date: 20250213-01
 RutilVM Assistor
 
 메뉴 항목 순서:
@@ -2658,7 +2658,7 @@ def show_networks(stdscr, connection):
 
 
 # =============================================================================
-# Section 9: Storage Domains Section (Revised Layout)
+# Section 9: Storage Domains Section
 # =============================================================================
 
 def format_status_from_data_center(data_centers_service, domain):
@@ -3016,9 +3016,8 @@ def show_storage_domain_details(stdscr, domain_name, domain_info):
         height, width = stdscr.getmaxyx()
         for line in range(y, height - 1):
             stdscr.addstr(line, 0, " " * width)
-        stdscr.addstr(height - 1, 0, " " + "ESC=Go back | Q=Quit")
+        stdscr.addstr(height - 2, 0, " " + "ESC=Go back | Q=Quit")
         stdscr.clrtoeol()
-        
         stdscr.noutrefresh()
         curses.doupdate()
         
@@ -3058,8 +3057,8 @@ def main_loop(stdscr, storage_domains, storage_info, data_centers_status):
         y = draw_virtual_machines_table(stdscr, selected_domain, storage_info, vm_page, vm_page_size, y)
         y += 1
         height, width = stdscr.getmaxyx()
-        nav_text = " ▲/▼=Navigate | Enter=View Disks Details | ESC=Go back | Q=Quit"
-        stdscr.addstr(height - 1, 0, nav_text, curses.color_pair(2))
+        nav_text = "▲/▼=Navigate | Enter=View Disks Details | ESC=Go back | Q=Quit"
+        stdscr.addstr(height - 2, 1, nav_text, curses.color_pair(2))
         stdscr.noutrefresh()
         curses.doupdate()
         # 사용자 입력에 따라 메뉴 내 항목 선택, 페이지 이동, 상세보기 진입 등을 처리함.
