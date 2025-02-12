@@ -1,6 +1,6 @@
 #!/usr/bin/python3
 """
-date: 20250213-01
+date: 20250212-03
 RutilVM Assistor
 
 메뉴 항목 순서:
@@ -10,7 +10,7 @@ RutilVM Assistor
   4. Hosts
   5. Networks
   6. Storage Domains
-  7. Storage Disks       ← (추후 구현: placeholder)
+  7. Storage Disks
   8. Users               ← (추후 구현: placeholder)
   9. Certificate         ← (추후 구현: placeholder)
 
@@ -2383,9 +2383,15 @@ def draw_screen(stdscr, network_info, selected_network_idx, vm_page, MAX_VM_ROWS
     net_headers = ["Network Name", "Data Center", "Description", "Role", "VLAN Tag", "MTU", "Port Isolation"]
     net_widths = [22, 23, 27, 6, 8, 13, 14]
     try:
-        stdscr.addstr(net_table_start, 0, indent + "┌" + "┬".join("─" * w for w in net_widths) + "┐")
-        stdscr.addstr(net_table_start + 1, 0, indent + "│" + "│".join(f"{truncate_with_ellipsis(h, w):<{w}}" for h, w in zip(net_headers, net_widths)) + "│")
-        stdscr.addstr(net_table_start + 2, 0, indent + "├" + "┼".join("─" * w for w in net_widths) + "┤")
+#        stdscr.addstr(net_table_start, 0, "┌" + "┬".join("─" * w for w in net_widths) + "┐")
+#        stdscr.addstr(net_table_start + 1, 0, indent + "│" + "│".join(f"{truncate_with_ellipsis(h, w):<{w}}" for h, w in zip(net_headers, net_widths)) + "│")
+#        stdscr.addstr(net_table_start + 2, 0, indent + "├" + "┼".join("─" * w for w in net_widths) + "┤")
+        stdscr.addstr(net_table_start + 0, 1, "┌" + "┬".join("─" * w for w in net_widths) + "┐")
+        # 헤더
+        stdscr.addstr(net_table_start + 1, 1, "│" + "│".join(f"{truncate_with_ellipsis(h, w):<{w}}" for h, w in zip(net_headers, net_widths)) + "│")
+        # 헤더 하단
+        stdscr.addstr(net_table_start + 2, 1, "├" + "┼".join("─" * w for w in net_widths) + "┤")
+
     except curses.error:
         pass
     for idx, net in enumerate(network_info):
@@ -2402,11 +2408,13 @@ def draw_screen(stdscr, network_info, selected_network_idx, vm_page, MAX_VM_ROWS
         ]
         try:
             color = curses.color_pair(1) if idx == selected_network_idx else 0
-            stdscr.addstr(net_table_start + 3 + idx, 0, indent + "│" + "│".join(f"{col:<{w}}" for col, w in zip(row, net_widths)) + "│", color)
+#            stdscr.addstr(net_table_start + 3 + idx, 0, indent + "│" + "│".join(f"{col:<{w}}" for col, w in zip(row, net_widths)) + "│", color)
+            stdscr.addstr(net_table_start + 3 + idx, 1, "│" + "│".join(f"{truncate_with_ellipsis(col, w):<{w}}" for col, w in zip(row, net_widths)) + "│", color)
         except curses.error:
             pass
     try:
-        stdscr.addstr(net_table_start + 3 + len(network_info), 0, indent + "└" + "┴".join("─" * w for w in net_widths) + "┘")
+#        stdscr.addstr(net_table_start + 3 + len(network_info), 0, indent + "└" + "┴".join("─" * w for w in net_widths) + "┘")
+        stdscr.addstr(net_table_start + 3 + len(network_info), 1, "└" + "┴".join("─" * w for w in net_widths) + "┘")
     except curses.error:
         pass
 
@@ -2541,10 +2549,9 @@ def draw_screen(stdscr, network_info, selected_network_idx, vm_page, MAX_VM_ROWS
     stdscr.noutrefresh()
 
 def show_networks(stdscr, connection):
-    # 색상 초기화: Network List 테이블의 선택된 행 커서 색상 설정
+    # 색상 초기화 및 curses 설정
     curses.start_color()
     curses.init_pair(1, curses.COLOR_BLACK, curses.COLOR_CYAN)
-
     stdscr.nodelay(True)
     stdscr.keypad(True)
     curses.curs_set(0)
@@ -2555,60 +2562,79 @@ def show_networks(stdscr, connection):
     clusters_service = system_service.clusters_service()
     data_centers_service = system_service.data_centers_service()
     hosts_service = system_service.hosts_service()
+    vnic_profiles_service = system_service.vnic_profiles_service()
 
+    # 미리 조회: 클러스터, 데이터 센터, 호스트, vNIC 프로파일 정보
     clusters = {cluster.id: cluster.name for cluster in clusters_service.list()}
     data_centers = {dc.id: dc.name for dc in data_centers_service.list()}
     hosts = {host.id: host.name for host in hosts_service.list()}
-    vnic_profiles_service = system_service.vnic_profiles_service()
     vnic_profiles = {profile.id: profile for profile in vnic_profiles_service.list()}
 
+    # 네트워크 목록 조회
     networks = networks_service.list()
 
+    # *** 최적화된 VM 정보 조회 (모든 VM을 한 번만 조회) ***
+    all_vms = vms_service.list()
+    # 네트워크 ID별로 해당하는 VM 정보를 저장할 딕셔너리 (중복 VM은 vm.id 기준으로 집계)
+    vm_mapping = {}  # { network_id: { vm_id: vm_detail_dict, ... }, ... }
+    for vm in all_vms:
+        try:
+            vm_service = vms_service.vm_service(vm.id)
+            nics = vm_service.nics_service().list()
+            for nic in nics:
+                if not nic.vnic_profile:
+                    continue
+                vnic_profile_id = nic.vnic_profile.id
+                if vnic_profile_id not in vnic_profiles:
+                    continue
+                vnic_profile = vnic_profiles[vnic_profile_id]
+                # 해당 NIC가 소속된 네트워크 ID가 있는 경우
+                if not (vnic_profile.network and getattr(vnic_profile.network, "id", None)):
+                    continue
+                net_id = vnic_profile.network.id
+                # NIC에 해당하는 VM의 상세정보 구성 (IP 조회 등)
+                try:
+                    reported_devices = vm_service.reported_devices_service().list()
+                    ip_addresses = []
+                    for device in reported_devices:
+                        if device.ips:
+                            for ip in device.ips:
+                                if ip.version == types.IpVersion.V4:
+                                    ip_addresses.append(ip.address)
+                    ip_address = ", ".join(ip_addresses) if ip_addresses else "-"
+                except Exception:
+                    ip_address = "-"
+
+                cluster_name = clusters.get(vm.cluster.id, "-") if vm.cluster else "-"
+                host_name = hosts.get(vm.host.id, "-") if (vm.status == types.VmStatus.UP and vm.host) else "-"
+                vnic_status = "Up" if vm.status == types.VmStatus.UP else "Down"
+                vnic_name = nic.name if nic.name else "-"
+
+                # vm_mapping에 추가 (동일 VM이 여러 NIC를 가진 경우 vnic 정보는 ','로 연결)
+                if net_id not in vm_mapping:
+                    vm_mapping[net_id] = {}
+                if vm.id not in vm_mapping[net_id]:
+                    vm_mapping[net_id][vm.id] = {
+                        "vm_name": vm.name or "-",
+                        "cluster": cluster_name,
+                        "ip": ip_address,
+                        "host_name": host_name,
+                        "vnic_status": vnic_status,
+                        "vnic": vnic_name,
+                        "id": vm.id
+                    }
+                else:
+                    existing = vm_mapping[net_id][vm.id]["vnic"]
+                    if vnic_name not in existing.split(","):
+                        vm_mapping[net_id][vm.id]["vnic"] = existing + "," + vnic_name
+        except Exception:
+            pass
+
+    # 네트워크별 정보 구성 (각 네트워크에 해당하는 VM 정보는 vm_mapping에서 가져옴)
     network_info = []
     for net in networks:
         data_center_name = data_centers.get(net.data_center.id, "-") if net.data_center else "-"
-        associated_vms_dict = {}
-        for vm in vms_service.list():
-            vm_service = vms_service.vm_service(vm.id)
-            try:
-                nics = vm_service.nics_service().list()
-                for nic in nics:
-                    vnic_profile_id = nic.vnic_profile.id if nic.vnic_profile else None
-                    if vnic_profile_id and vnic_profile_id in vnic_profiles:
-                        vnic_profile = vnic_profiles[vnic_profile_id]
-                        if vnic_profile.network and getattr(vnic_profile.network, "id", None) == net.id:
-                            try:
-                                reported_devices = vm_service.reported_devices_service().list()
-                                ip_addresses = []
-                                for device in reported_devices:
-                                    if device.ips:
-                                        for ip in device.ips:
-                                            if ip.version == types.IpVersion.V4:
-                                                ip_addresses.append(ip.address)
-                                ip_address = ", ".join(ip_addresses) if ip_addresses else "-"
-                            except Exception:
-                                ip_address = "-"
-                            cluster_name = clusters.get(vm.cluster.id, "-") if vm.cluster else "-"
-                            host_name = hosts.get(vm.host.id, "-") if (vm.status == types.VmStatus.UP and vm.host) else "-"
-                            vnic_status = "Up" if vm.status == types.VmStatus.UP else "Down"
-                            vnic_name = nic.name if nic.name else "-"
-                            if vm.id not in associated_vms_dict:
-                                associated_vms_dict[vm.id] = {
-                                    "vm_name": vm.name or "-",
-                                    "cluster": cluster_name,
-                                    "ip": ip_address,
-                                    "host_name": host_name,
-                                    "vnic_status": vnic_status,
-                                    "vnic": vnic_name,
-                                    "id": vm.id
-                                }
-                            else:
-                                existing = associated_vms_dict[vm.id]["vnic"]
-                                if vnic_name not in existing.split(","):
-                                    associated_vms_dict[vm.id]["vnic"] = existing + "," + vnic_name
-            except Exception:
-                pass
-        aggregated_vms = list(associated_vms_dict.values())
+        aggregated_vms = list(vm_mapping.get(net.id, {}).values())
         network_info.append({
             "id": net.id,
             "name": net.name or "-",
@@ -2621,6 +2647,7 @@ def show_networks(stdscr, connection):
             "vms": aggregated_vms
         })
 
+    # draw_screen()과 네비게이션 부분
     selected_network_idx = 0
     vm_page = 1
     MAX_VM_ROWS = 5
@@ -2650,12 +2677,10 @@ def show_networks(stdscr, connection):
         elif key in (ord('p'), ord('P')):
             if vm_page > 1:
                 vm_page -= 1
-        elif key in (10, 13):  # ENTER 키를 눌렀을 때
-            show_event_page(stdscr, connection, network_info[selected_network_idx])  # 네트워크 정보 전달
-
+        elif key in (10, 13):  # ENTER 키
+            show_event_page(stdscr, connection, network_info[selected_network_idx])
         else:
             time.sleep(0.05)
-
 
 # =============================================================================
 # Section 9: Storage Domains Section
@@ -2941,11 +2966,6 @@ def draw_virtual_machines_table(stdscr, selected_domain, storage_info, vm_page, 
 def show_storage_domain_details(stdscr, domain_name, domain_info):
     """
     세부 디스크 정보를 페이징 처리하여 출력.
-    - 헤더에 "- Details for <domain_name> (Page X/Y)"를 표시하고,
-    - 테이블은 제목행을 제외하고 페이지 당 최대 40행의 디스크 정보를 보여줌.
-      (해당 페이지에 출력할 데이터 행이 40개 미만이면, 실제 데이터 행만 출력하며,
-       데이터가 하나도 없으면 각 셀에 단일 "-"만 보이게 함.)
-    - 테이블 하단에는 "N=Next | P=Prev" 문구를, 터미널 맨 아래에는 "ESC=Go back | Q=Quit" 문구를 표시.
     """
     curses.curs_set(0)
     page = 0
@@ -3107,20 +3127,304 @@ def show_storage_domains(stdscr, connection):
     main_loop(stdscr, storage_domains, storage_info, data_centers_status)
 
 # =============================================================================
-# Section 10: Storage Disks Section (Placeholder)
+# Section 10: Storage Disks Section
 # =============================================================================
 
 def show_storage_disks(stdscr, connection):
     """
-    [Placeholder]
-    Storage Disks 관련 기능 미구현.
-    이곳에 향후 Storage Disks 관련 코드를 채워 넣을 예정.
+    Storage Disks 화면 – 디스크 목록을 표 형태로 보여줌
+    
     """
-    stdscr.erase()
-    stdscr.addstr(1, 1, "Storage Disks functionality is not yet implemented.", curses.A_BOLD)
-    stdscr.addstr(3, 1, "Press any key to go back.")
-    stdscr.refresh()
-    stdscr.getch()
+    # curses 기본 설정
+    curses.curs_set(0)
+    curses.start_color()
+    curses.init_pair(1, curses.COLOR_BLACK, curses.COLOR_CYAN)
+
+    # -------------------------------------------------------------------------
+    # 내부 헬퍼 함수: draw_table
+    # -------------------------------------------------------------------------
+    def draw_table(stdscr, disks, current_idx, page, total_pages, sort_key, reverse_sort):
+        stdscr.erase()
+        height, width = stdscr.getmaxyx()
+
+        # 상단 헤더 출력
+        stdscr.addstr(1, 1, "Disk", curses.A_BOLD)
+        stdscr.addstr(3, 1, "- Disk List")
+
+        # 테이블 시작 행 지정
+        table_start_row = 4
+
+        # 수정된 열 너비 설정: [51, 13, 27, 26]
+        column_widths = [51, 13, 27, 26]
+        horizontal_line = "─"
+        vertical_line = "│"
+        corner_tl = "┌"
+        corner_tr = "┐"
+        corner_bl = "└"
+        corner_br = "┘"
+        cross = "┼"
+        t_top = "┬"
+        t_bottom = "┴"
+        t_left = "├"
+        t_right = "┤"
+
+        # 테이블 상단 테두리
+        header_line = corner_tl + t_top.join([horizontal_line * w for w in column_widths]) + corner_tr
+        stdscr.addstr(table_start_row, 1, header_line)
+
+        # 헤더 제목 행 (각 열의 제목 및 지정된 너비로 출력)
+        stdscr.addstr(table_start_row + 1, 1,
+                      f"{vertical_line}{'Disk Name':<51}{vertical_line}{'Size (GB)':<13}{vertical_line}{'Storage Domain':<27}{vertical_line}{'VM Name':<26}{vertical_line}")
+
+        # 헤더 구분선
+        header_divider = t_left + cross.join([horizontal_line * w for w in column_widths]) + t_right
+        stdscr.addstr(table_start_row + 2, 1, header_divider)
+
+        # 데이터 영역 시작 행
+        data_start_row = table_start_row + 3
+        max_disks_per_page = 27
+        start_index = page * max_disks_per_page
+
+        # 디스크 정렬: 'size'는 숫자 비교, 그 외는 문자열 비교
+        sorted_disks = sorted(disks,
+                              key=lambda d: (float(d.get(sort_key, 0)) if sort_key == 'size' else d.get(sort_key, "")),
+                              reverse=reverse_sort)
+        current_disks = sorted_disks[start_index:start_index + max_disks_per_page]
+
+        # 각 디스크 데이터 행 출력
+        for i, disk in enumerate(current_disks):
+            disk_name = (disk['name'] or "N/A")[:51]
+            disk_size = (str(disk['size']) or "N/A")[:13]
+            storage_domain = (disk['storage_domain'] or "N/A")[:27]
+            vm_name = (disk['vm_name'] or "N/A")[:26]
+            row_str = (f"{vertical_line}{disk_name:<51}{vertical_line}"
+                       f"{disk_size:<13}{vertical_line}"
+                       f"{storage_domain:<27}{vertical_line}"
+                       f"{vm_name:<26}{vertical_line}")
+            if i == current_idx:
+                stdscr.attron(curses.color_pair(1))
+                stdscr.addstr(data_start_row + i, 1, row_str)
+                stdscr.attroff(curses.color_pair(1))
+            else:
+                stdscr.addstr(data_start_row + i, 1, row_str)
+
+        # 테이블 하단 테두리
+        table_bottom_row = data_start_row + len(current_disks)
+        bottom_border = corner_bl + t_bottom.join([horizontal_line * w for w in column_widths]) + corner_br
+        stdscr.addstr(table_bottom_row, 1, bottom_border)
+
+        # 터미널 맨 아래에 도움말 문구 출력
+        help_text = "ESC=Go back | Q=Quit"
+        stdscr.addstr(height - 1, 1, help_text)
+
+        stdscr.noutrefresh()
+        curses.doupdate()
+        return sorted_disks, current_disks
+
+    # -------------------------------------------------------------------------
+    # 내부 헬퍼 함수: draw_disk_details
+    # -------------------------------------------------------------------------
+    def draw_disk_details(stdscr, disk):
+        stdscr.clear()
+        stdscr.nodelay(False)  # 블로킹 모드로 전환 (키 입력 대기)
+        height, width = stdscr.getmaxyx()
+    
+        # 상단 헤더 출력 (굵은 글씨 속성 제거)
+        stdscr.addstr(1, 1, "- Disk Details")
+    
+        # 테이블 출력 시작 행 지정 (바로 아래, 즉 row 2부터 시작)
+        table_start_row = 2
+    
+        # 테이블에 사용할 고정 열 너비 및 문양 정의
+        column_widths = [46, 79]
+        horizontal_line = "─"
+        vertical_line = "│"
+        corner_tl = "┌"
+        corner_tr = "┐"
+        corner_bl = "└"
+        corner_br = "┘"
+        cross = "┼"
+        t_top = "┬"
+        t_bottom = "┴"
+        t_left = "├"
+        t_right = "┤"
+    
+        # 테이블 상단 테두리
+        header_line = corner_tl + t_top.join([horizontal_line * w for w in column_widths]) + corner_tr
+        stdscr.addstr(table_start_row, 1, header_line)
+    
+        # 헤더 제목 행
+        header_row = table_start_row + 1
+        stdscr.addstr(header_row, 1,
+                      f"{vertical_line}{'Field':<46}{vertical_line}{'Value':<79}{vertical_line}")
+    
+        # 헤더 구분선
+        divider_row = table_start_row + 2
+        stdscr.addstr(divider_row, 1, t_left + cross.join([horizontal_line * w for w in column_widths]) + t_right)
+    
+        # 디스크 상세 정보 (필드, 값) 출력
+        details = [
+            ("Name", disk['name']),
+            ("Size (GB)", disk['size']),
+            ("Storage Domain", disk['storage_domain']),
+            ("VM Name", disk['vm_name']),
+            ("Content Type", disk['content_type']),
+            ("ID", disk['id']),
+            ("Alias", disk.get('alias', 'N/A')),
+            ("Description", disk.get('description', 'N/A')),
+            ("Disk Profile", str(disk.get('disk_profile', 'N/A'))),
+            ("Wipe After Delete", disk.get('wipe_after_delete', 'N/A')),
+            ("Virtual Size (GB)", disk.get('virtual_size', 'N/A')),
+            ("Actual Size (GB)", disk.get('actual_size', 'N/A')),
+            ("Allocation Policy", disk.get('allocation_policy', 'N/A'))
+        ]
+    
+        for i, (field, value) in enumerate(details):
+            stdscr.addstr(divider_row + 1 + i, 1,
+                          f"{vertical_line}{field:<46}{vertical_line}{str(value):<79}{vertical_line}")
+    
+        # 테이블 하단 테두리 출력
+        table_bottom_row = divider_row + 1 + len(details)
+        bottom_border = corner_bl + t_bottom.join([horizontal_line * w for w in column_widths]) + corner_br
+        stdscr.addstr(table_bottom_row, 1, bottom_border)
+    
+        # 터미널 하단에 도움말 문구 출력 (마지막 행)
+        help_text = "ESC=Go back | Q=Quit"
+        stdscr.addstr(height - 1, 1, help_text)
+    
+        stdscr.refresh()
+    
+        # ESC(27) 또는 'q' 키가 눌릴 때까지 대기
+        while True:
+            key = stdscr.getch()
+            if key in (27, ord('q')):
+                break
+    
+    # -------------------------------------------------------------------------
+    # 내부 헬퍼 함수: fetch_disk_data
+    # -------------------------------------------------------------------------
+    def fetch_disk_data(connection):
+        disks_service = connection.system_service().disks_service()
+        vms_service = connection.system_service().vms_service()
+        storage_domains_service = connection.system_service().storage_domains_service()
+
+        disks = disks_service.list()
+        data = []
+
+        # VM 정보 캐싱 (디스크가 첨부된 VM 이름)
+        vm_disk_map = {}
+        for vm in vms_service.list():
+            vm_name = vm.name
+            try:
+                attachments = vms_service.vm_service(vm.id).disk_attachments_service().list()
+            except Exception:
+                attachments = []
+            for attachment in attachments:
+                vm_disk_map[attachment.disk.id] = vm_name
+
+        for disk in disks:
+            # OVF_STORE 디스크는 제외
+            if disk.name == "OVF_STORE":
+                continue
+
+            disk_name = disk.name
+            disk_size = round(disk.provisioned_size / (1024 ** 3), 2)  # GB 단위 변환
+            storage_domain_name = "N/A"
+            vm_name = vm_disk_map.get(disk.id, "N/A")
+
+            # 스토리지 도메인 이름 조회
+            if disk.storage_domains:
+                storage_domain_id = disk.storage_domains[0].id
+                try:
+                    storage_domain = storage_domains_service.storage_domain_service(storage_domain_id).get()
+                    storage_domain_name = storage_domain.name
+                except Exception:
+                    storage_domain_name = "N/A"
+
+            # 디스크 유형 결정
+            content_type = "data"  # 기본값
+            if disk.content_type:
+                content_type = str(disk.content_type)
+            elif disk.bootable:
+                content_type = "boot"
+            elif disk.shareable:
+                content_type = "shared"
+            elif disk.format == "raw" and disk.wipe_after_delete:
+                content_type = "iso"
+
+            # 디스크 할당 정책
+            allocation_policy = "thin" if getattr(disk, 'thin_provisioning', False) else "thick"
+
+            data.append({
+                'name': disk_name,
+                'size': disk_size,
+                'storage_domain': storage_domain_name,
+                'vm_name': vm_name,
+                'content_type': content_type,
+                'id': disk.id,
+                'alias': getattr(disk, 'alias', "N/A"),
+                'description': getattr(disk, 'description', "N/A"),
+                'disk_profile': str(getattr(disk, 'disk_profile', "N/A")),
+                'wipe_after_delete': getattr(disk, 'wipe_after_delete', False),
+                'virtual_size': round(getattr(disk, 'provisioned_size', 0) / (1024 ** 3), 2),
+                'actual_size': round(getattr(disk, 'actual_size', 0) / (1024 ** 3), 2),
+                'allocation_policy': allocation_policy
+            })
+
+        return data
+
+    # -------------------------------------------------------------------------
+    # 메인 로직: 디스크 데이터 조회 및 키 입력 처리
+    # -------------------------------------------------------------------------
+    disks = fetch_disk_data(connection)
+    current_idx = 0
+    page = 0
+    max_disks_per_page = 27
+    sort_key = 'name'      # 초기 정렬 키: 이름순
+    reverse_sort = False   # 초기 정렬 방향: 오름차순
+    total_pages = (len(disks) + max_disks_per_page - 1) // max_disks_per_page
+
+    while True:
+        sorted_disks, current_disks = draw_table(stdscr, disks, current_idx, page, total_pages, sort_key, reverse_sort)
+        num_disks = len(current_disks)
+        key = stdscr.getch()
+
+        if key in (curses.KEY_UP, 65):
+            if num_disks > 0:
+                current_idx = (current_idx - 1) % num_disks
+        elif key in (curses.KEY_DOWN, 66):
+            if num_disks > 0:
+                current_idx = (current_idx + 1) % num_disks
+        elif key == ord('n'):
+            page = (page + 1) % total_pages
+            current_idx = 0
+        elif key == ord('p'):
+            page = (page - 1) % total_pages
+            current_idx = 0
+        elif key == ord('d'):
+            reverse_sort = not reverse_sort if sort_key == 'name' else False
+            sort_key = 'name'
+        elif key == ord('s'):
+            reverse_sort = not reverse_sort if sort_key == 'size' else False
+            sort_key = 'size'
+        elif key == ord('t'):
+            reverse_sort = not reverse_sort if sort_key == 'content_type' else False
+            sort_key = 'content_type'
+        elif key == ord('o'):
+            reverse_sort = not reverse_sort if sort_key == 'allocation_policy' else False
+            sort_key = 'allocation_policy'
+        elif key == ord('v'):
+            reverse_sort = not reverse_sort if sort_key == 'vm_name' else False
+            sort_key = 'vm_name'
+        elif key == ord('i'):
+            reverse_sort = not reverse_sort if sort_key == 'storage_domain' else False
+            sort_key = 'storage_domain'
+        elif key == 10:  # ENTER 키: 선택한 디스크 상세 정보 표시
+            if num_disks > 0:
+                selected_disk = current_disks[current_idx]
+                draw_disk_details(stdscr, selected_disk)
+        elif key == 27 or key == ord('q'):  # ESC 또는 Q 키: 상위 메뉴로 복귀 또는 종료
+            break
 
 # =============================================================================
 # Section 11: Users Section (Placeholder)
