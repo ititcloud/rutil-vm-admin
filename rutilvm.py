@@ -1,6 +1,6 @@
 #!/usr/bin/python3
 """
-date: 20250212-03
+date: 20250224-01
 RutilVM Assistor
 
 메뉴 항목 순서:
@@ -11,9 +11,10 @@ RutilVM Assistor
   5. Networks
   6. Storage Domains
   7. Storage Disks
-  8. Users               ← (추후 구현: placeholder)
+  8. Users
   9. Certificate         ← (추후 구현: placeholder)
-
+  10. Events
+  
 """
 
 # =============================================================================
@@ -34,6 +35,7 @@ import pickle           # 세션 저장/불러오기
 import signal           # 시그널 핸들링
 import textwrap         # 텍스트 자동 줄바꿈
 import time             # 시간 관련 함수
+import threading        # ← 추가된 threading 모듈
 from datetime import datetime, timezone  # 날짜/시간 처리
 from ovirtsdk4.types import Host, VmStatus, Ip, IpVersion  # oVirt SDK 타입
 from ovirtsdk4 import Connection, Error  # oVirt SDK 연결 및 오류 처리
@@ -41,6 +43,12 @@ from requests.auth import HTTPBasicAuth  # HTTP 기본 인증
 import socket           # 네트워크 연결 확인
 import math             # 수학 관련 함수, 상수 등을 사용
 import ovirtsdk4.types as types  # oVirt SDK 타입 사용
+import locale
+import shlex
+import pexpect
+from urllib.parse import urlparse
+from requests.auth import HTTPBasicAuth
+locale.setlocale(locale.LC_ALL, '')
 
 # HTTPS 경고 메시지 비활성화
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -49,17 +57,10 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 def truncate_with_ellipsis(value, max_width):
     """문자열의 길이가 max_width보다 길면 생략 부호(...)를 추가하여 잘라 반환"""
-    # value가 존재하면 문자열로 변환하고, 그렇지 않으면 "-" 문자열을 할당.
     value = str(value) if value else "-"
-    
-    # 문자열의 길이가 max_width보다 큰 경우
     if len(value) > max_width:
-        # max_width에서 2를 뺀 길이까지 자르고, 뒤에 ".."을 붙여 반환.
         return value[:max_width - 2] + ".."
-    
-    # 문자열 길이가 max_width 이내라면 원래 문자열을 그대로 반환.
     return value
-
 
 def get_network_speed(interface):
     """
@@ -123,31 +124,20 @@ def draw_table(stdscr, start_y, headers, col_widths, data, row_func, current_row
     stdscr.addstr(start_y, 1, header_line)
     stdscr.addstr(start_y + 1, 1, "│" + "│".join(get_display_width(h, w) for h, w in zip(headers, col_widths)) + "│")
     stdscr.addstr(start_y + 2, 1, divider_line)
-    # 데이터 리스트가 비어 있는 경우, 빈 행을 출력.
     if not data:
-        # 데이터가 없을 때 각 열에 "-"를 표시하여 빈 행을 구성.
         empty_row = "│" + "│".join(get_display_width("-", w) for w in col_widths) + "│"
         stdscr.addstr(start_y + 3, 1, empty_row)
     else:
-        # 데이터가 있을 경우, 각 항목을 순회하며 테이블의 각 행을 출력.
         for idx, item in enumerate(data):
             row_y = start_y + 3 + idx
             row_data = [ensure_non_empty(d) for d in row_func(item)]
             row_text = "│" + "│".join(get_display_width(d, w) for d, w in zip(row_data, col_widths)) + "│"
-            # 현재 행이 강조되어야 하는 행(current_row)과 일치하는지 확인.
             if idx == current_row:
-                # 강조 색상을 적용하기 위해 color_pair(1)를 활성화.
                 stdscr.attron(curses.color_pair(1))
-                # 강조된 색상으로 해당 행을 출력.
                 stdscr.addstr(row_y, 1, row_text)
-                # 강조 색상을 해제.
                 stdscr.attroff(curses.color_pair(1))
             else:
-                # 강조 대상이 아닌 경우 일반 색상으로 행을 출력.
                 stdscr.addstr(row_y, 1, row_text)
-    
-    # 테이블 하단 경계선을 출력.
-    # 데이터가 없는 경우 최소 한 줄의 높이를 사용하여 footer 위치를 조정.
     stdscr.addstr(start_y + 3 + max(len(data), 1), 1, footer_line)
 
 def check_ip_reachable(ip, port=443, timeout=5):
@@ -208,16 +198,12 @@ def get_ip_from_hosts(fqdn):
     print("You must run deploy first")
     sys.exit(1)
 
-# 전역 세션 관련 변수 (SSH_CONNECTION 기반)
 TERMINAL_SESSION_ID = os.environ.get("SSH_CONNECTION", "local_session").replace(" ", "_")
 SESSION_FILE = f"/tmp/ovirt_session_{TERMINAL_SESSION_ID}.pkl"
 session_data = None
 delete_session_on_exit = False
 
 def load_session():
-    """
-    SESSION_FILE에 저장된 세션 데이터를 불러와 전역 변수에 저장.
-    """
     global session_data
     if session_data:
         return session_data
@@ -231,18 +217,12 @@ def load_session():
     return None
 
 def save_session(username, password, url):
-    """
-    사용자명, 비밀번호, URL을 세션 데이터로 저장하여 SESSION_FILE에 기록.
-    """
     global session_data
     session_data = {"username": username, "password": password, "url": url}
     with open(SESSION_FILE, "wb") as file:
         pickle.dump(session_data, file)
 
 def clear_session():
-    """
-    delete_session_on_exit가 참이면 세션 데이터를 지우고 파일을 삭제.
-    """
     global session_data
     if delete_session_on_exit:
         session_data = None
@@ -250,14 +230,10 @@ def clear_session():
             os.remove(SESSION_FILE)
 
 def signal_handler(sig, frame):
-    """
-    SIGINT, SIGHUP, SIGTERM 시그널을 처리하여 세션 삭제 없이 종료.
-    """
     global delete_session_on_exit
     delete_session_on_exit = False
     sys.exit(0)
 
-# 시그널 핸들러 등록
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGHUP, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
@@ -279,13 +255,14 @@ def main_menu(stdscr, connection):
       7. Storage Disks      ← 추후 구현 (placeholder)
       8. Users              ← 추후 구현 (placeholder)
       9. Certificate        ← 추후 구현 (placeholder)
+      10. Events
     """
-    curses.curs_set(0)  # 커서 숨김
-    curses.cbreak()     # 키 입력 즉시 처리
-    curses.start_color()  # 색상 초기화
-    curses.init_pair(1, curses.COLOR_BLACK, curses.COLOR_CYAN)  # 선택 메뉴 색상
-    curses.init_pair(2, curses.COLOR_WHITE, curses.COLOR_BLACK)  # 기본 색상
-    stdscr.timeout(50)  # 입력 대기 시간 50ms
+    curses.curs_set(0)
+    curses.cbreak()
+    curses.start_color()
+    curses.init_pair(1, curses.COLOR_BLACK, curses.COLOR_CYAN)
+    curses.init_pair(2, curses.COLOR_WHITE, curses.COLOR_BLACK)
+    stdscr.timeout(50)
 
     menu = [
         "Virtual Machines",
@@ -296,7 +273,8 @@ def main_menu(stdscr, connection):
         "Storage Domains",
         "Storage Disks",
         "Users",
-        "Certificate"
+        "Certificate",
+        "Events"
     ]
     current_row = 0
 
@@ -344,20 +322,17 @@ def main_menu(stdscr, connection):
             elif menu[current_row] == "Hosts":
                 show_hosts(stdscr, connection)
             elif menu[current_row] == "Networks":
-                # ← 필요한 함수 추가: Networks
                 show_networks(stdscr, connection)
             elif menu[current_row] == "Storage Domains":
-                # ← 필요한 함수 추가: Storage Domains
                 show_storage_domains(stdscr, connection)
             elif menu[current_row] == "Storage Disks":
-                # ← 필요한 함수 추가: Storage Disks
                 show_storage_disks(stdscr, connection)
             elif menu[current_row] == "Users":
-                # ← 필요한 함수 추가: Users
                 show_users(stdscr, connection)
             elif menu[current_row] == "Certificate":
-                # ← 필요한 함수 추가: Certificate
                 show_certificates(stdscr, connection)
+            elif menu[current_row] == "Events":
+                show_events(stdscr, connection)
 
 # =============================================================================
 # Section 4: Virtual Machines Section
@@ -1189,7 +1164,7 @@ def show_related_data(stdscr, connection, data_center, start_y):
         cl.comment or "N/A"
     ])
 
-def show_events(stdscr, connection, data_center):
+def show_events_data_center(stdscr, connection, data_center):
     """
     선택한 데이터 센터와 관련된 이벤트를 페이지 단위로 표시.
     """
@@ -1301,7 +1276,7 @@ def show_data_centers(stdscr, connection):
         elif key == curses.KEY_DOWN:
             current_row = (current_row + 1) % len(dcs)
         elif key == 10:
-            show_events(stdscr, connection, dcs[current_row])
+            show_events_data_center(stdscr, connection, dcs[current_row])
         elif key == 27:
             break
         elif key == ord('q'):
@@ -2383,15 +2358,9 @@ def draw_screen(stdscr, network_info, selected_network_idx, vm_page, MAX_VM_ROWS
     net_headers = ["Network Name", "Data Center", "Description", "Role", "VLAN Tag", "MTU", "Port Isolation"]
     net_widths = [22, 23, 27, 6, 8, 13, 14]
     try:
-#        stdscr.addstr(net_table_start, 0, "┌" + "┬".join("─" * w for w in net_widths) + "┐")
-#        stdscr.addstr(net_table_start + 1, 0, indent + "│" + "│".join(f"{truncate_with_ellipsis(h, w):<{w}}" for h, w in zip(net_headers, net_widths)) + "│")
-#        stdscr.addstr(net_table_start + 2, 0, indent + "├" + "┼".join("─" * w for w in net_widths) + "┤")
-        stdscr.addstr(net_table_start + 0, 1, "┌" + "┬".join("─" * w for w in net_widths) + "┐")
-        # 헤더
-        stdscr.addstr(net_table_start + 1, 1, "│" + "│".join(f"{truncate_with_ellipsis(h, w):<{w}}" for h, w in zip(net_headers, net_widths)) + "│")
-        # 헤더 하단
-        stdscr.addstr(net_table_start + 2, 1, "├" + "┼".join("─" * w for w in net_widths) + "┤")
-
+        stdscr.addstr(net_table_start, 0, indent + "┌" + "┬".join("─" * w for w in net_widths) + "┐")
+        stdscr.addstr(net_table_start + 1, 0, indent + "│" + "│".join(f"{truncate_with_ellipsis(h, w):<{w}}" for h, w in zip(net_headers, net_widths)) + "│")
+        stdscr.addstr(net_table_start + 2, 0, indent + "├" + "┼".join("─" * w for w in net_widths) + "┤")
     except curses.error:
         pass
     for idx, net in enumerate(network_info):
@@ -2408,13 +2377,11 @@ def draw_screen(stdscr, network_info, selected_network_idx, vm_page, MAX_VM_ROWS
         ]
         try:
             color = curses.color_pair(1) if idx == selected_network_idx else 0
-#            stdscr.addstr(net_table_start + 3 + idx, 0, indent + "│" + "│".join(f"{col:<{w}}" for col, w in zip(row, net_widths)) + "│", color)
-            stdscr.addstr(net_table_start + 3 + idx, 1, "│" + "│".join(f"{truncate_with_ellipsis(col, w):<{w}}" for col, w in zip(row, net_widths)) + "│", color)
+            stdscr.addstr(net_table_start + 3 + idx, 0, indent + "│" + "│".join(f"{col:<{w}}" for col, w in zip(row, net_widths)) + "│", color)
         except curses.error:
             pass
     try:
-#        stdscr.addstr(net_table_start + 3 + len(network_info), 0, indent + "└" + "┴".join("─" * w for w in net_widths) + "┘")
-        stdscr.addstr(net_table_start + 3 + len(network_info), 1, "└" + "┴".join("─" * w for w in net_widths) + "┘")
+        stdscr.addstr(net_table_start + 3 + len(network_info), 0, indent + "└" + "┴".join("─" * w for w in net_widths) + "┘")
     except curses.error:
         pass
 
@@ -2966,6 +2933,11 @@ def draw_virtual_machines_table(stdscr, selected_domain, storage_info, vm_page, 
 def show_storage_domain_details(stdscr, domain_name, domain_info):
     """
     세부 디스크 정보를 페이징 처리하여 출력.
+    - 헤더에 "- Details for <domain_name> (Page X/Y)"를 표시하고,
+    - 테이블은 제목행을 제외하고 페이지 당 최대 40행의 디스크 정보를 보여줌.
+      (해당 페이지에 출력할 데이터 행이 40개 미만이면, 실제 데이터 행만 출력하며,
+       데이터가 하나도 없으면 각 셀에 단일 "-"만 보이게 함.)
+    - 테이블 하단에는 "N=Next | P=Prev" 문구를, 터미널 맨 아래에는 "ESC=Go back | Q=Quit" 문구를 표시.
     """
     curses.curs_set(0)
     page = 0
@@ -3427,20 +3399,587 @@ def show_storage_disks(stdscr, connection):
             break
 
 # =============================================================================
-# Section 11: Users Section (Placeholder)
+# Section 11: Users Section
 # =============================================================================
+# ---------------------------------------------------------------------------
+# 유틸리티 함수
+# ---------------------------------------------------------------------------
+def get_display_width(text, width):
+    """
+    지정된 폭(width)에 맞춰 문자열을 자르거나 패딩함.
+    """
+    if len(text) > width:
+        return text[:width]
+    return text.ljust(width)
 
+# SSH 연결 재활용(SSH Multiplexing) 옵션
+CONTROL_OPTS = "-o ControlMaster=auto -o ControlPath=/tmp/ssh_mux_%r@%h:%p"
+
+# 사용자 목록 캐싱: 동일 호스트에 대해 5초간 캐시된 결과 재사용
+_USERS_CACHE = {}
+_CACHE_TIMEOUT = 5  # seconds
+
+def get_users_output(engine_host):
+    """
+    SSH를 이용해 사용자 목록을 가져오며, 결과를 캐싱함.
+    """
+    global _USERS_CACHE
+    current_time = time.time()
+    if engine_host in _USERS_CACHE:
+        cached_time, cached_output = _USERS_CACHE[engine_host]
+        if current_time - cached_time < _CACHE_TIMEOUT:
+            return cached_output
+
+    # 사용자 목록을 조회하는 SSH 명령어 (Multiplexing 옵션 포함)
+    query_cmd = f"ssh {CONTROL_OPTS} -o StrictHostKeyChecking=no root@{engine_host} \"ovirt-aaa-jdbc-tool query --what=user\""
+    result = subprocess.run(query_cmd, shell=True, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True, timeout=15)
+    if result.returncode != 0:
+        raise Exception(result.stderr.strip())
+    output = result.stdout
+    _USERS_CACHE[engine_host] = (current_time, output)
+    return output
+
+def clear_users_cache(engine_host):
+    """
+    지정된 호스트의 캐시를 제거함.
+    """
+    global _USERS_CACHE
+    if engine_host in _USERS_CACHE:
+        del _USERS_CACHE[engine_host]
+
+def show_error_popup(stdscr, title, message):
+    """
+    curses 창에 에러 메시지를 팝업으로 표시함.
+    """
+    height, width = stdscr.getmaxyx()
+    popup_height = 7
+    popup_width = min(len(message) + 4, width - 4)
+    popup_y = (height - popup_height) // 2
+    popup_x = (width - popup_width) // 2
+    popup = curses.newwin(popup_height, popup_width, popup_y, popup_x)
+    popup.border()
+    popup.addstr(1, (popup_width - len(title)) // 2, title)
+    popup.addstr(3, (popup_width - len(message)) // 2, message)
+    prompt = "Press any key to continue"
+    popup.addstr(popup_height - 2, (popup_width - len(prompt)) // 2, prompt)
+    popup.refresh()
+    popup.getch()
+
+def show_custom_popup(stdscr, title, message):
+    """
+    일반 메시지 팝업을 표시하며, 메시지 텍스트를 중앙 정렬합니다.
+    """
+    import textwrap
+    popup_height = 12
+    popup_width = 60
+    scr_height, scr_width = stdscr.getmaxyx()
+    popup_y = (scr_height - popup_height) // 2
+    popup_x = (scr_width - popup_width) // 2
+    popup = curses.newwin(popup_height, popup_width, popup_y, popup_x)
+    popup.keypad(True)
+    curses.curs_set(0)
+    popup.border()
+    # 제목 중앙 정렬 (굵은 글씨)
+    popup.addstr(1, (popup_width - len(title)) // 2, title, curses.A_BOLD)
+    # 메시지 라인들을 중앙 정렬하여 표시
+    message_lines = textwrap.wrap(message, width=popup_width - 4)
+    start_line = 5
+    for i, line in enumerate(message_lines):
+        if start_line + i >= popup_height - 2:
+            break
+        popup.addstr(start_line + i, (popup_width - len(line)) // 2, line)
+    prompt = "Press any key to continue"
+    popup.addstr(popup_height - 2, (popup_width - len(prompt)) // 2, prompt, curses.A_NORMAL)
+    popup.refresh()
+    popup.getch()
+
+
+# ---------------------------------------------------------------------------
+# 사용자 추가 및 수정 관련 함수
+# ---------------------------------------------------------------------------
+def add_user_popup_form(stdscr, connection, refresh_users_callback):
+    """
+    사용자 추가 팝업창을 표시하고, SSH와 API를 통해 새 사용자를 등록함.
+    
+    단계:
+      1. SSH를 통해 사용자 생성 및 firstName 업데이트
+      2. 비밀번호 재설정 (Interactive Password Reset)
+      3. SSH를 통해 password-valid-to 값 설정
+      4. API를 통해 사용자 역할 및 webAdmin 속성 업데이트
+    """
+    popup_height = 12
+    popup_width = 60
+    scr_height, scr_width = stdscr.getmaxyx()
+    popup_y = (scr_height - popup_height) // 2
+    popup_x = (scr_width - popup_width) // 2
+    popup = curses.newwin(popup_height, popup_width, popup_y, popup_x)
+    popup.keypad(True)
+    curses.curs_set(1)
+
+    parsed_url = urlparse(connection.url)
+    engine_host = parsed_url.hostname
+
+    # 사용자 입력을 받을 때까지 루프
+    while True:
+        popup.clear()
+        popup.border()
+        header = "Add New User"
+        popup.addstr(1, (popup_width - len(header)) // 2, header)
+        # 입력 필드 표시
+        popup.addstr(4, 2, "Username:")
+        popup.addstr(5, 2, "Password:")
+        popup.addstr(6, 2, "Re-Password:")
+        instructions = "TAB or ▲/▼=Navigate | ENTER=Submit | ESC=Cancel"
+        popup.addstr(10, 2, instructions)
+        popup.refresh()
+
+        # 사용자 입력 필드 (username, password, 재입력 password)
+        fields = [
+            {"label": "Username:", "value": "", "y": 4, "x": 2 + len("Username:") + 1, "max_len": 30, "hidden": False},
+            {"label": "Password:", "value": "", "y": 5, "x": 2 + len("Password:") + 1, "max_len": 30, "hidden": True},
+            {"label": "Re-Password:", "value": "", "y": 6, "x": 2 + len("Re-Password:") + 1, "max_len": 30, "hidden": True},
+        ]
+        current_field = 0
+        popup.move(fields[0]["y"], fields[0]["x"])
+        popup.refresh()
+
+        # 필드 간 탐색 및 입력 처리
+        while True:
+            for idx, field in enumerate(fields):
+                display_val = field["value"] if not field["hidden"] else "*" * len(field["value"])
+                popup.addstr(field["y"], field["x"], " " * field["max_len"])
+                popup.addstr(field["y"], field["x"], display_val)
+            popup.move(fields[current_field]["y"], fields[current_field]["x"] + len(fields[current_field]["value"]))
+            popup.refresh()
+            ch = popup.getch()
+            if ch in (9, curses.KEY_DOWN):
+                current_field = (current_field + 1) % len(fields)
+            elif ch == curses.KEY_UP:
+                current_field = (current_field - 1) % len(fields)
+            elif ch in (27,):  # ESC 키로 취소
+                return
+            elif ch in (curses.KEY_ENTER, 10, 13):
+                # 모든 필드가 채워졌는지, 비밀번호가 일치하는지 확인
+                if all(field["value"] for field in fields):
+                    if fields[1]["value"] != fields[2]["value"]:
+                        curses.curs_set(0)
+                        popup.addstr(8, 2, "Passwords do not match!")
+                        popup.refresh()
+                        curses.napms(1500)
+                        popup.addstr(8, 2, " " * (popup_width - 4))
+                        popup.refresh()
+                        curses.curs_set(1)
+                        continue
+                    else:
+                        break
+                else:
+                    curses.curs_set(0)
+                    popup.addstr(8, 2, "All fields are required!")
+                    popup.refresh()
+                    curses.napms(1500)
+                    popup.addstr(8, 2, " " * (popup_width - 4))
+                    popup.refresh()
+                    curses.curs_set(1)
+                    continue
+            elif ch in (curses.KEY_BACKSPACE, 127, 8):
+                if fields[current_field]["value"]:
+                    fields[current_field]["value"] = fields[current_field]["value"][:-1]
+            elif 0 <= ch < 256:
+                if len(fields[current_field]["value"]) < fields[current_field]["max_len"]:
+                    fields[current_field]["value"] += chr(ch)
+        username = fields[0]["value"].strip()
+        new_password = fields[1]["value"]
+
+        # SSH를 통해 해당 사용자가 이미 존재하는지 확인
+        try:
+            check_user_cmd = f"ovirt-aaa-jdbc-tool query --what=user | grep -w '{username}'"
+            ssh_check_cmd = f"ssh {CONTROL_OPTS} -o StrictHostKeyChecking=no root@{engine_host} \"{check_user_cmd}\""
+            check_result = subprocess.run(ssh_check_cmd, shell=True,
+                                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            if check_result.returncode == 0:
+                curses.curs_set(0)
+                popup.addstr(8, 2, "User already exists!")
+                popup.refresh()
+                curses.napms(1500)
+                popup.addstr(8, 2, " " * (popup_width - 4))
+                popup.refresh()
+                curses.curs_set(1)
+                fields[0]["value"] = ""
+                continue
+        except Exception:
+            curses.curs_set(0)
+            popup.addstr(8, 2, "Error checking user!")
+            popup.refresh()
+            curses.napms(1500)
+            popup.addstr(8, 2, " " * (popup_width - 4))
+            popup.refresh()
+            curses.curs_set(1)
+            continue
+        break
+
+    # SSH를 통해 새 사용자 생성
+    try:
+        add_user_cmd = f"ovirt-aaa-jdbc-tool user add {username} >/dev/null 2>&1"
+        ssh_add_cmd = f"ssh {CONTROL_OPTS} -o StrictHostKeyChecking=no root@{engine_host} \"{add_user_cmd}\""
+        subprocess.run(ssh_add_cmd, shell=True, check=True)
+    except subprocess.CalledProcessError as e:
+        show_error_popup(stdscr, "Error", f"SSH Error during user add: {str(e)}")
+        return
+
+    # firstName 속성 업데이트
+    try:
+        first_name_cmd = f"ovirt-aaa-jdbc-tool user edit {username} --attribute=firstName={username}"
+        ssh_firstname_cmd = f"ssh {CONTROL_OPTS} -o StrictHostKeyChecking=no root@{engine_host} \"{first_name_cmd}\""
+        subprocess.run(ssh_firstname_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except Exception as e:
+        show_error_popup(stdscr, "Error", f"Error setting firstName: {str(e)}")
+        return
+
+    # 비밀번호 재설정 (interactive 방식)
+    if not set_user_password(engine_host, username, new_password, stdscr):
+        show_error_popup(stdscr, "Error", "Failed to set password.")
+        return
+
+    # password-valid-to 값 설정
+    try:
+        edit_cmd = f'ovirt-aaa-jdbc-tool user edit {username} --password-valid-to="2125-12-31 12:00:00-0000"'
+        ssh_edit_cmd = f"ssh {CONTROL_OPTS} -o StrictHostKeyChecking=no root@{engine_host} {shlex.quote(edit_cmd)}"
+        subprocess.run(ssh_edit_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except Exception as e:
+        show_error_popup(stdscr, "Error", f"Error setting password valid date: {str(e)}")
+        return
+
+    # API를 통한 사용자 역할 및 webAdmin 속성 업데이트 (실패시 예외 무시)
+    try:
+        users_service = connection.system_service().users_service()
+        new_user_obj = next((u for u in users_service.list() if getattr(u, "name", "") == username), None)
+        if not new_user_obj:
+            new_user_obj = users_service.add(
+                User(
+                    user_name=f"{username}@internal-authz",
+                    domain=Domain(name="internal-authz")
+                )
+            )
+        roles_service = connection.system_service().roles_service()
+        super_user_role = next((r for r in roles_service.list() if r.name == "SuperUser"), None)
+        if super_user_role:
+            permissions_service = connection.system_service().permissions_service()
+            permissions_service.add(Permission(role=super_user_role, user=new_user_obj))
+    except Exception:
+        pass
+    try:
+        OVIRT_URL = connection.url
+        USER_ID = new_user_obj.id
+        webadmin_url = f"{OVIRT_URL}/users/{USER_ID}"
+        webadmin_data = "<user><webAdmin>true</webAdmin></user>"
+        new_user_account = f"{username}@internal"
+        requests.put(
+            webadmin_url,
+            data=webadmin_data,
+            auth=HTTPBasicAuth(new_user_account, new_password),
+            headers={"Content-Type": "application/xml", "Accept": "application/xml"},
+            verify=False
+        )
+    except Exception:
+        pass
+
+    # 사용자 생성 완료 메시지 표시
+    popup.clear()
+    popup.border()
+    complete_msg = f"User {username} created successfully."
+    # 5번째 줄(인덱스 5)에 보통 글씨체(curses.A_NORMAL)로 출력
+    popup.addstr(5, (popup_width - len(complete_msg)) // 2, complete_msg, curses.A_NORMAL)
+    success_prompt = "Press any key to continue"
+    popup.addstr(popup_height - 2, (popup_width - len(success_prompt)) // 2, success_prompt)
+    popup.refresh()
+    popup.getch()
+
+
+    clear_users_cache(engine_host)
+    refresh_users_callback()
+    curses.curs_set(0)
+
+def parse_user_query_output(output):
+    """
+    ovirt-aaa-jdbc-tool의 출력 결과를 파싱하여 사용자 리스트를 반환함.
+    """
+    users = []
+    current_user = None
+    for line in output.splitlines():
+        line = line.strip()
+        if not line or line.startswith("Picked up"):
+            continue
+        if line.startswith("-- User"):
+            if current_user is not None:
+                users.append(current_user)
+            current_user = {}
+            m = re.search(r"-- User\s+(\S+)\s*\(([^)]+)\)", line)
+            if m:
+                current_user["Name"] = m.group(1)
+                current_user["ID"] = m.group(2)
+        else:
+            if ":" in line and current_user is not None:
+                key, val = line.split(":", 1)
+                current_user[key.strip()] = val.strip()
+    if current_user:
+        users.append(current_user)
+    return users
+
+# ---------------------------------------------------------------------------
+# 사용자 목록 및 상세정보 표시 함수
+# ---------------------------------------------------------------------------
 def show_users(stdscr, connection):
     """
-    [Placeholder]
-    Users 관련 기능 미구현.
-    이곳에 향후 Users 관련 코드를 채워 넣을 예정.
+    curses 인터페이스에 사용자 목록을 122열 크기의 테이블 형식으로 표시합니다.
+    
+    - 상단 헤더: 왼쪽에는 "- USER LIST (Total User X/Y)"를, 오른쪽에는 "(Page A/B)"를
+      122열 기준 고정 위치에 출력합니다.
+    - 한 페이지당 최대 25명의 사용자를 표시합니다.
+    - 하단 푸터: 왼쪽에는 기본 내비게이션 명령어를, 오른쪽에는 "N=Next | P=Prev"를
+      122열 기준 고정 위치에 출력합니다.
     """
-    stdscr.erase()
-    stdscr.addstr(1, 1, "Users functionality is not yet implemented.", curses.A_BOLD)
-    stdscr.addstr(3, 1, "Press any key to go back.")
+    curses.curs_set(0)
+    curses.cbreak()
+    curses.start_color()
+    curses.init_pair(1, curses.COLOR_BLACK, curses.COLOR_CYAN)
+    curses.init_pair(2, curses.COLOR_WHITE, curses.COLOR_BLACK)
+    stdscr.timeout(50)
+
+    fixed_width = 122  # 테이블 및 헤더/푸터 기준 폭
+
+    parsed_url = urlparse(connection.url)
+    engine_host = parsed_url.hostname
+
+    try:
+        output = get_users_output(engine_host)
+    except Exception as e:
+        show_error_popup(stdscr, "Error", f"Query command error: {str(e)}")
+        return
+    users = parse_user_query_output(output)
+
+    selected_users = set()
+    current_row = 0
+    rows_per_page = 25  # 한 페이지당 최대 25명 표시
+    total_users = len(users)
+    total_pages = max(1, (total_users + rows_per_page - 1) // rows_per_page)
+    current_page = 0
+    # 122 = sum(col_widths) + 7, 그러므로 sum(col_widths) = 115
+    # 예: [24, 17, 17, 19, 14, 24] 의 합은 115
+    col_widths = [24, 17, 17, 19, 14, 24]
+    headers = ["Username", "Account Disabled", "Account Locked", "First Name", "Last Name", "Email"]
+
+    while True:
+        stdscr.erase()
+        height, width = stdscr.getmaxyx()
+        if height < 20 or width < fixed_width:
+            stdscr.addstr(0, 0, f"Resize terminal to at least {fixed_width}x20.", curses.color_pair(2))
+            stdscr.noutrefresh()
+            curses.doupdate()
+            continue
+
+        # 상단 헤더 출력 (122열 기준 고정)
+        stdscr.addstr(1, 1, "USER", curses.A_BOLD)
+        start_idx = current_page * rows_per_page
+        current_page_count = min(rows_per_page, total_users - start_idx)
+        left_header = f"- USER LIST (Total User {current_page_count}/{total_users})"
+        page_info = f"(Page {current_page+1}/{total_pages})"
+        stdscr.addstr(3, 1, left_header)
+        stdscr.addstr(3, fixed_width - len(page_info), page_info)
+
+        # 테이블 헤더 그리기
+        stdscr.addstr(4, 1, "┌" + "┬".join("─" * w for w in col_widths) + "┐")
+        header_cells = [get_display_width(h, w) for h, w in zip(headers, col_widths)]
+        header_text = "│" + "│".join(header_cells) + "│"
+        stdscr.addstr(5, 1, header_text)
+        divider_line = "├" + "┼".join("─" * w for w in col_widths) + "┤"
+        stdscr.addstr(6, 1, divider_line)
+        
+        start_idx = current_page * rows_per_page
+        end_idx = min(start_idx + rows_per_page, total_users)
+        displayed_count = end_idx - start_idx
+
+        # 사용자 목록 각 행 출력
+        for idx, user in enumerate(users[start_idx:end_idx]):
+            row_y = 7 + idx
+            marker = "[x] " if (start_idx + idx) in selected_users else "[ ] "
+            row_data = [
+                get_display_width(marker + user.get("Name", "-"), col_widths[0]),
+                get_display_width(user.get("Account Disabled", "-"), col_widths[1]),
+                get_display_width(user.get("Account Locked", "-"), col_widths[2]),
+                get_display_width(user.get("First Name", "-"), col_widths[3]),
+                get_display_width(user.get("Last Name", "-"), col_widths[4]),
+                get_display_width(user.get("Email", "-"), col_widths[5])
+            ]
+            row_text = "│" + "│".join(row_data) + "│"
+            if idx == current_row:
+                stdscr.attron(curses.color_pair(1))
+                stdscr.addstr(row_y, 1, row_text)
+                stdscr.attroff(curses.color_pair(1))
+            else:
+                stdscr.addstr(row_y, 1, row_text)
+        
+        footer_line = "└" + "┴".join("─" * w for w in col_widths) + "┘"
+        stdscr.addstr(7 + displayed_count, 1, footer_line)
+
+        # 하단 푸터 출력 (122열 기준 고정)
+        footer_left = "▲/▼=Navigate | SPACE=Select | ENTER=Details | U=Unlock | A=Add | ESC=Go back | Q=Quit"
+        footer_right = "N=Next | P=Prev" if total_pages > 1 else ""
+        stdscr.addstr(height - 2, 1, footer_left)
+        if footer_right:
+            stdscr.addstr(height - 2, fixed_width - len(footer_right), footer_right)
+        stdscr.refresh()
+
+        # 사용자 입력 처리
+        key = stdscr.getch()
+        if key == ord('q'):
+            exit(0)
+        elif key == 27:
+            break
+        elif key == curses.KEY_UP:
+            if displayed_count > 0:
+                current_row = (current_row - 1) % displayed_count
+        elif key == curses.KEY_DOWN:
+            if displayed_count > 0:
+                current_row = (current_row + 1) % displayed_count
+        elif key == ord('n') and total_pages > 1 and current_page < total_pages - 1:
+            current_page += 1
+            current_row = 0
+        elif key == ord('p') and total_pages > 1 and current_page > 0:
+            current_page -= 1
+            current_row = 0
+        elif key == ord(' '):
+            user_index = start_idx + current_row
+            if user_index in selected_users:
+                selected_users.remove(user_index)
+            else:
+                selected_users.add(user_index)
+        elif key in (curses.KEY_ENTER, 10, 13):
+            user_index = start_idx + current_row
+            show_user_details(stdscr, connection, users[user_index])
+        elif key == ord('a'):
+            # 사용자 추가 후 목록 새로 고침
+            add_user_popup_form(stdscr, connection, lambda: None)
+            clear_users_cache(engine_host)
+            try:
+                output = get_users_output(engine_host)
+                users = parse_user_query_output(output)
+                total_users = len(users)
+                total_pages = max(1, (total_users + rows_per_page - 1) // rows_per_page)
+                current_page = 0
+                current_row = 0
+            except Exception as e:
+                show_error_popup(stdscr, "Error", f"Failed to refresh users: {str(e)}")
+            curses.curs_set(0)
+        elif key == ord('u'):
+            # 선택된 사용자에 대해 일괄 잠금 해제
+            if not selected_users:
+                continue
+            already_unlocked = []
+            other_results = []
+            for user_index in sorted(selected_users):
+                selected_user = users[user_index]
+                username = selected_user.get("Name", None)
+                if not username or username == "-":
+                    other_results.append("User with invalid name skipped.")
+                    continue
+                if selected_user.get("Account Locked", "").strip().lower() != "true":
+                    already_unlocked.append(username)
+                    continue
+                unlock_cmd = f"ssh {CONTROL_OPTS} -o StrictHostKeyChecking=no root@{engine_host} \"ovirt-aaa-jdbc-tool user unlock {username}\""
+                try:
+                    unlock_result = subprocess.run(unlock_cmd, shell=True,
+                                                   stdout=subprocess.PIPE,
+                                                   stderr=subprocess.PIPE,
+                                                   text=True, timeout=15)
+                    if unlock_result.returncode == 0:
+                        other_results.append(f"User {username} unlocked successfully.")
+                    else:
+                        other_results.append(f"User {username} unlock failed: {unlock_result.stderr.strip()}")
+                except Exception as e:
+                    other_results.append(f"User {username} unlock error: {str(e)}")
+            selected_users.clear()
+            combined_messages = []
+            if already_unlocked:
+                combined_messages.append("User " + ", ".join(already_unlocked) + " is already unlocked.")
+            if other_results:
+                combined_messages.extend(other_results)
+            combined_message = "\n".join(combined_messages)
+            show_custom_popup(stdscr, "Batch Unlock Results", combined_message)
+
+def show_user_details(stdscr, connection, user):
+    """
+    선택한 사용자의 상세 정보를 표시함.
+    """
+    parsed_url = urlparse(connection.url)
+    engine_host = parsed_url.hostname
+    username = user.get("Name", "-")
+    
+    details_cmd = f"ssh {CONTROL_OPTS} -o StrictHostKeyChecking=no root@{engine_host} \"ovirt-aaa-jdbc-tool user show {username}\""
+    try:
+        result = subprocess.run(details_cmd, shell=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, timeout=15)
+    except Exception as e:
+        show_error_popup(stdscr, "Error", f"Failed to execute details command: {str(e)}")
+        return
+    if result.returncode != 0:
+        show_error_popup(stdscr, "Error", f"Failed to get user details: {result.stderr.strip()}")
+        return
+
+    # 출력 결과 파싱
+    details = {}
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line or line.startswith("-- User"):
+            continue
+        if ":" in line:
+            key, val = line.split(":", 1)
+            details[key.strip()] = val.strip()
+
+    fields_order = [
+        "Name", "ID", "Display Name", "Email", "First Name", "Last Name",
+        "Department", "Title", "Description", "Account Disabled",
+        "Account Locked", "Account Unlocked At", "Account Valid From",
+        "Account Valid To", "Account Without Password", "Last successful Login At",
+        "Last unsuccessful Login At", "Password Valid To"
+    ]
+
+    stdscr.clear()
+    height, width = stdscr.getmaxyx()
+    title = f"User Details for {username}"
+    stdscr.addstr(1, 1, title, curses.A_BOLD)
+    start_y = 3
+    for idx, field in enumerate(fields_order):
+        value = details.get(field, "-")
+        stdscr.addstr(start_y + idx, 2, f"{field}: {value}")
+    footer_text = "ESC=Go back | Q=Quit"
+    stdscr.addstr(height - 2, 2, footer_text, curses.A_DIM)
     stdscr.refresh()
-    stdscr.getch()
+    while True:
+        key = stdscr.getch()
+        if key == 27:
+            break
+        elif key in (ord('q'), ord('Q')):
+            exit(0)
+
+def set_user_password(engine_host, username, new_password, stdscr):
+    """
+    pexpect를 이용하여 SSH 세션에서 비밀번호 재설정 과정을 자동화함.
+    """
+    try:
+        cmd = f"ssh {CONTROL_OPTS} -tt -o StrictHostKeyChecking=no root@{engine_host} \"/usr/bin/ovirt-aaa-jdbc-tool user password-reset {username}\""
+        child = pexpect.spawn(cmd, encoding='utf-8', timeout=15)
+        password_prompt_regex = re.compile(r'(?i)(new password|password):')
+        child.expect(password_prompt_regex)
+        child.sendline(new_password)
+        child.expect(password_prompt_regex, timeout=15)
+        child.sendline(new_password)
+        child.expect(pexpect.EOF, timeout=15)
+        child.close()
+        return True
+    except Exception:
+        return False
 
 # =============================================================================
 # Section 12: Certificate Section (Placeholder)
@@ -3457,33 +3996,546 @@ def show_certificates(stdscr, connection):
     stdscr.addstr(3, 1, "Press any key to go back.")
     stdscr.refresh()
     stdscr.getch()
+    
+# =============================================================================
+# Section 13: Evnets Section
+# =============================================================================
+
+import curses
+import textwrap
+import time
+import threading
+from datetime import datetime
+
+def show_no_events_popup(stdscr, message="No events found."):
+    """
+    'No events found.' 등의 메시지를 팝업 창으로 표시함.
+    아무 키나 누르면 팝업만 닫고 반환함.
+    """
+    curses.flushinp()
+    height, width = stdscr.getmaxyx()
+    popup_height = 7
+    popup_width = 50
+    popup_y = (height - popup_height) // 2
+    popup_x = (width - popup_width) // 2
+
+    popup = curses.newwin(popup_height, popup_width, popup_y, popup_x)
+    popup.keypad(True)
+    popup.timeout(-1)  # 블로킹 모드
+    popup.border()
+
+    # 중앙 정렬 출력
+    popup.addstr(2, (popup_width - len(message)) // 2, message, curses.A_BOLD)
+    footer = "Press any key to continue."
+    popup.addstr(4, (popup_width - len(footer)) // 2, footer, curses.A_DIM)
+    popup.refresh()
+
+    # 팝업 창에서 키 입력 대기
+    popup.getch()
+    curses.flushinp()
+
+    # 팝업 윈도우 지우고 닫기
+    popup.clear()
+    popup.refresh()
+    del popup
+
+def fetch_events(connection, result):
+    """
+    별도 스레드에서 이벤트 목록을 가져와서 result 딕셔너리에 저장함.
+    """
+    try:
+        events_service = connection.system_service().events_service()
+        events = events_service.list()
+        # 시간 역순 정렬
+        events.sort(key=lambda ev: ev.time if ev.time else datetime.min, reverse=True)
+        result['events'] = events
+    except Exception as e:
+        result['error'] = str(e)
+
+def event_truncate_with_ellipsis(s, max_length):
+    """
+    문자열 s가 max_length를 넘으면 '...'로 끝을 표시하여 자르고,
+    넘지 않으면 그대로 반환함.
+    """
+    if len(s) <= max_length:
+        return s
+    return s[:max_length - 3] + '...'
+
+def show_event_detail(stdscr, event):
+    """
+    선택한 이벤트의 상세 정보를 보여줍니다.
+    사용자가 키를 누를 때까지 대기함.
+    """
+    stdscr.nodelay(False)
+    curses.flushinp()
+    stdscr.clear()
+    height, width = stdscr.getmaxyx()
+
+    detail_lines = []
+    detail_lines.append("Event Detail")
+    detail_lines.append("")
+    event_time = event.time.strftime('%Y-%m-%d %H:%M:%S') if event.time else "-"
+    severity = getattr(event.severity, 'name', str(event.severity)) if event.severity else "-"
+    description = event.description if event.description else "-"
+
+    detail_lines.append(f"Time: {event_time}")
+    detail_lines.append(f"Severity: {severity}")
+    detail_lines.append("Description:")
+
+    wrapped_desc = textwrap.wrap(description, width=width - 4)
+    detail_lines.extend(wrapped_desc)
+    detail_lines.append("")
+    detail_lines.append("Press any key to go back.")
+
+    for idx, line in enumerate(detail_lines):
+        if idx + 2 < height:
+            stdscr.addstr(idx + 2, 1, line)
+    stdscr.refresh()
+    stdscr.getch()
+
+def show_events(stdscr, connection):
+    """
+    이벤트 화면:
+      - 검색어 입력 후 Enter로 필터 적용
+      - w 키: Severity가 WARNING인 이벤트만 표시
+      - e 키: Severity가 ERROR인 이벤트만 표시
+      - r 키: 이벤트 목록 새로 조회(Refresh)
+      - 테이블은 항상 40줄을 그려서 필터 결과가 없어도 테두리가 유지됨
+      - 검색 모드일 때는 검색 상자만 부분 갱신(속도 개선).
+      - 검색 결과가 없을 경우 팝업 창으로 "No events found." 메시지를 표시한 후
+        기존 테이블을 다시 그려주고, 이후 검색창으로 포커스 이동 가능
+      - 화면 맨 아래: TAB=Switch focus | W=WARNING | E=ERROR | R=Refresh | ESC=Go back | Q=Quit
+    """
+    stdscr.erase()
+    stdscr.nodelay(True)
+    spinner_chars = ['|', '/', '-', '\\']
+    spinner_index = 0
+
+    # 1) 별도 스레드로 이벤트를 불러옴
+    import threading
+    result = {}
+    fetch_thread = threading.Thread(target=fetch_events, args=(connection, result))
+    fetch_thread.start()
+    while fetch_thread.is_alive():
+        stdscr.erase()
+        stdscr.addstr(1, 1, f"Loading events... {spinner_chars[spinner_index]}", curses.A_BOLD)
+        stdscr.refresh()
+        spinner_index = (spinner_index + 1) % len(spinner_chars)
+        time.sleep(0.1)
+    fetch_thread.join()
+    stdscr.nodelay(False)
+
+    if 'error' in result:
+        stdscr.erase()
+        stdscr.addstr(1, 1, f"Failed to fetch Events: {result['error']}")
+        stdscr.refresh()
+        stdscr.getch()
+        return
+
+    events = result.get('events', [])
+    search_query = ""         # 현재 적용된 검색어 (검색 전 상태)
+    pending_search = ""       # 사용자가 입력 중인 검색어
+    severity_filter = ""
+    current_focus = "table"   # 초기에는 테이블 모드
+    selected_row = 0
+    current_page = 0
+
+    curses.curs_set(0)
+    curses.start_color()
+    curses.init_pair(1, curses.COLOR_BLACK, curses.COLOR_CYAN)
+    curses.init_pair(2, curses.COLOR_WHITE, curses.COLOR_BLACK)
+    stdscr.clear()
+
+    # UI 레이아웃 상수
+    search_left_width = 7
+    search_right_width = 113
+    table_col1_width = 19
+    table_col2_width = 9
+    table_col3_width = 91
+    table_total_width = 1 + table_col1_width + 1 + table_col2_width + 1 + table_col3_width + 1
+    rows_per_page = 40
+    min_height = 4 + rows_per_page + 4  # 검색 상자(3줄) + 테이블(40줄) + 기타
+
+    # 검색 상자 관련
+    search_box_top = 4
+    search_top_border = "┌" + "─" * search_left_width + "┬" + "─" * search_right_width + "┐"
+    search_bottom_border = "└" + "─" * search_left_width + "┴" + "─" * search_right_width + "┘"
+
+    # 필터링 결과 캐싱 (검색어/심각도 조건이 바뀔 때만 새로 계산)
+    last_filter_query = None
+    last_severity_filter = None
+    cached_filtered_events = events
+
+    # 팝업 닫힌 뒤 검색창으로 포커스 이동할지 여부
+    force_search_focus = False
+    just_redrawn_table = False
+
+    while True:
+        height, width = stdscr.getmaxyx()
+        if height < min_height or width < table_total_width + 4:
+            stdscr.erase()
+            stdscr.addstr(0, 0,
+                          f"Resize terminal to at least {table_total_width+4}x{min_height}.",
+                          curses.color_pair(2))
+            stdscr.refresh()
+            continue
+
+        # 팝업 닫은 뒤, 곧바로 검색 모드로 이동해야 하는 경우 처리
+        if force_search_focus and not just_redrawn_table:
+            current_focus = "table"
+        elif force_search_focus and just_redrawn_table:
+            current_focus = "search"
+            force_search_focus = False
+            just_redrawn_table = False
+
+        # -----------------------------
+        # (1) 검색 모드
+        # -----------------------------
+        if current_focus == "search":
+            just_redrawn_table = False
+            stdscr.addstr(search_box_top, 1, search_top_border)
+            left_cell = "Search:".ljust(search_left_width)
+            displayed_query = pending_search[-search_right_width:]
+            right_cell = displayed_query.ljust(search_right_width)
+            search_input_line = "│" + left_cell + "│" + right_cell + "│"
+            stdscr.addstr(search_box_top + 1, 1, search_input_line)
+            stdscr.addstr(search_box_top + 2, 1, search_bottom_border)
+            # 커서 위치 지정
+            cursor_x = 2 + 1 + search_left_width + 1 + min(len(pending_search), search_right_width) - 1
+            curses.curs_set(1)
+            stdscr.move(search_box_top + 1, cursor_x)
+            stdscr.refresh()
+
+            key = stdscr.getch()
+            if key in (9, curses.KEY_BTAB):
+                current_focus = "table"
+            elif key == 27:
+                current_focus = "table"
+            elif key in (curses.KEY_BACKSPACE, 127, 8):
+                pending_search = pending_search[:-1]
+            elif key == 10:  # Enter: 검색 적용
+                # 임시로 필터링 테스트
+                temp_filtered = events
+                if pending_search:
+                    sq = pending_search.lower()
+                    temp_filtered = [
+                        ev for ev in temp_filtered
+                        if ((ev.description and sq in ev.description.lower())
+                            or (ev.severity and sq in getattr(ev.severity, 'name', str(ev.severity)).lower())
+                            or (ev.time and sq in ev.time.strftime('%Y-%m-%d %H:%M:%S')))
+                    ]
+                if severity_filter:
+                    temp_filtered = [
+                        ev for ev in temp_filtered
+                        if (ev.severity and severity_filter == getattr(ev.severity, 'name', str(ev.severity)).upper())
+                    ]
+                if not temp_filtered:
+                    show_no_events_popup(stdscr, "No events found.")
+                    # 테이블은 변경하지 않고, 검색창 포커스 이동
+                    current_focus = "table"
+                    force_search_focus = True
+                else:
+                    search_query = pending_search
+                    current_page = 0
+                    selected_row = 0
+                    current_focus = "table"
+            elif key != -1 and 32 <= key <= 126:
+                pending_search += chr(key)
+            continue
+
+        # -----------------------------
+        # (2) 테이블 모드
+        # -----------------------------
+        # 캐싱 로직: 검색어/Severity 필터가 달라졌으면 새로 필터링
+        if last_filter_query != search_query or last_severity_filter != severity_filter:
+            temp = events
+            if search_query:
+                sq = search_query.lower()
+                temp = [
+                    ev for ev in temp
+                    if ((ev.description and sq in ev.description.lower())
+                        or (ev.severity and sq in getattr(ev.severity, 'name', str(ev.severity)).lower())
+                        or (ev.time and sq in ev.time.strftime('%Y-%m-%d %H:%M:%S')))
+                ]
+            if severity_filter:
+                temp = [
+                    ev for ev in temp
+                    if (ev.severity and severity_filter == getattr(ev.severity, 'name', str(ev.severity)).upper())
+                ]
+            cached_filtered_events = temp
+            last_filter_query = search_query
+            last_severity_filter = severity_filter
+
+        filtered_events = cached_filtered_events
+
+        stdscr.erase()
+        stdscr.addstr(1, 1, "Events", curses.A_BOLD)
+
+        # 검색 상자 그리기 (테이블 모드에서도 표시)
+        stdscr.addstr(search_box_top, 1, search_top_border)
+        left_cell = "Search:".ljust(search_left_width)
+        displayed_query = pending_search[-search_right_width:]
+        right_cell = displayed_query.ljust(search_right_width)
+        search_input_line = "│" + left_cell + "│" + right_cell + "│"
+        stdscr.addstr(search_box_top + 1, 1, search_input_line)
+        stdscr.addstr(search_box_top + 2, 1, search_bottom_border)
+
+        # 테이블 헤더 그리기
+        table_top_border = "┌" + "─" * table_col1_width + "┬" + "─" * table_col2_width + "┬" + "─" * table_col3_width + "┐"
+        header_row = search_box_top + 3
+        table_header_line = ("│" + "Time".ljust(table_col1_width) +
+                             "│" + "Severity".ljust(table_col2_width) +
+                             "│" + "Description".ljust(table_col3_width) + "│")
+        if len(filtered_events) == 0:
+            divider_row_used = "├" + "─" * table_col1_width + "┴" + "─" * table_col2_width + "┴" + "─" * table_col3_width + "┤"
+        else:
+            divider_row_used = "├" + "─" * table_col1_width + "┼" + "─" * table_col2_width + "┼" + "─" * table_col3_width + "┤"
+        stdscr.addstr(header_row, 1, table_top_border)
+        stdscr.addstr(header_row + 1, 1, table_header_line)
+        stdscr.addstr(header_row + 2, 1, divider_row_used)
+        table_data_start = header_row + 3
+
+        # 페이지/테이블 데이터
+        total_pages = max(1, (len(filtered_events) + rows_per_page - 1) // rows_per_page)
+        if current_page >= total_pages:
+            current_page = max(0, total_pages - 1)
+            selected_row = 0
+
+        page_info = f"- Event List ({current_page+1}/{total_pages})"
+        stdscr.addstr(3, 1, page_info)
+
+        if len(filtered_events) == 0:
+            full_width = table_total_width - 2
+            message = "  No events found."
+            row_text = "│" + message.ljust(full_width) + "│"
+            stdscr.addstr(table_data_start, 1, row_text)
+            for i in range(1, rows_per_page):
+                blank_text = "│" + " " * full_width + "│"
+                stdscr.addstr(table_data_start + i, 1, blank_text)
+        else:
+            start_idx = current_page * rows_per_page
+            end_idx = start_idx + rows_per_page
+            current_page_events = filtered_events[start_idx:end_idx]
+            for i in range(rows_per_page):
+                row_y = table_data_start + i
+                if i < len(current_page_events):
+                    event = current_page_events[i]
+                    event_time = event.time.strftime('%Y-%m-%d %H:%M:%S') if event.time else "-"
+                    sev = getattr(event.severity, 'name', str(event.severity)) if event.severity else "-"
+                    description = event.description.replace("\n", " ") if event.description else "-"
+                    event_time = event_truncate_with_ellipsis(event_time, table_col1_width)
+                    sev = event_truncate_with_ellipsis(sev, table_col2_width)
+                    description = event_truncate_with_ellipsis(description, table_col3_width)
+                    row_text = (
+                        "│" + event_time.ljust(table_col1_width) +
+                        "│" + sev.ljust(table_col2_width) +
+                        "│" + description.ljust(table_col3_width) +
+                        "│"
+                    )
+                else:
+                    row_text = (
+                        "│" + " " * table_col1_width +
+                        "│" + " " * table_col2_width +
+                        "│" + " " * table_col3_width +
+                        "│"
+                    )
+                if current_focus == "table" and i == selected_row:
+                    stdscr.attron(curses.color_pair(1))
+                    stdscr.addstr(row_y, 1, row_text)
+                    stdscr.attroff(curses.color_pair(1))
+                else:
+                    stdscr.addstr(row_y, 1, row_text)
+
+        table_bottom_row = table_data_start + rows_per_page
+        table_bottom_border = (
+            "└" + "─" * table_col1_width +
+            "┴" + "─" * table_col2_width +
+            "┴" + "─" * table_col3_width +
+            "┘"
+        )
+        stdscr.addstr(table_bottom_row, 1, table_bottom_border)
+
+        nav_line1 = "N=Next | P=Prev"
+        stdscr.addstr(table_bottom_row + 1, 1, nav_line1, curses.color_pair(2))
+        nav_line2 = "TAB=Switch focus | W=WARNING | E=ERROR | R=Refresh | ESC=Go back | Q=Quit"
+        stdscr.addstr(height - 2, 1, nav_line2, curses.color_pair(2))
+
+        curses.curs_set(0)
+        stdscr.move(height - 1, width - 1)
+        stdscr.refresh()
+        just_redrawn_table = True
+
+        # 키 입력 처리
+        key = stdscr.getch()
+        if key == 9:  # Tab
+            current_focus = "search"
+            pending_search = search_query
+        elif key == curses.KEY_UP:
+            if selected_row > 0:
+                selected_row -= 1
+            else:
+                if current_page > 0:
+                    current_page -= 1
+                    selected_row = rows_per_page - 1
+        elif key == curses.KEY_DOWN:
+            if selected_row < rows_per_page - 1:
+                selected_row += 1
+            else:
+                if current_page < total_pages - 1:
+                    current_page += 1
+                    selected_row = 0
+        elif key in (ord('n'), ord('N')):
+            if current_page < total_pages - 1:
+                current_page += 1
+                selected_row = 0
+        elif key in (ord('p'), ord('P')):
+            if current_page > 0:
+                current_page -= 1
+                selected_row = 0
+
+        # -----------------------------
+        # (2-1) Severity 필터 (W/E 키)
+        # -----------------------------
+        elif key in (ord('w'), ord('W')):
+            old_severity = severity_filter
+            severity_filter = "WARNING"
+
+            # 새 필터로 미리 필터링 테스트
+            temp_filtered = events
+            if search_query:
+                sq = search_query.lower()
+                temp_filtered = [
+                    ev for ev in temp_filtered
+                    if ((ev.description and sq in ev.description.lower())
+                        or (ev.severity and sq in getattr(ev.severity, 'name', str(ev.severity)).lower())
+                        or (ev.time and sq in ev.time.strftime('%Y-%m-%d %H:%M:%S')))
+                ]
+            temp_filtered = [
+                ev for ev in temp_filtered
+                if (ev.severity and severity_filter == getattr(ev.severity, 'name', str(ev.severity)).upper())
+            ]
+            if not temp_filtered:
+                # 결과가 없다면 팝업만 띄우고, 필터 원복
+                show_no_events_popup(stdscr, "No WARNING events found.")
+                severity_filter = old_severity
+            else:
+                current_page = 0
+                selected_row = 0
+
+        elif key in (ord('e'), ord('E')):
+            old_severity = severity_filter
+            severity_filter = "ERROR"
+
+            # 새 필터로 미리 필터링 테스트
+            temp_filtered = events
+            if search_query:
+                sq = search_query.lower()
+                temp_filtered = [
+                    ev for ev in temp_filtered
+                    if ((ev.description and sq in ev.description.lower())
+                        or (ev.severity and sq in getattr(ev.severity, 'name', str(ev.severity)).lower())
+                        or (ev.time and sq in ev.time.strftime('%Y-%m-%d %H:%M:%S')))
+                ]
+            temp_filtered = [
+                ev for ev in temp_filtered
+                if (ev.severity and severity_filter == getattr(ev.severity, 'name', str(ev.severity)).upper())
+            ]
+            if not temp_filtered:
+                # 결과가 없다면 팝업만 띄우고, 필터 원복
+                show_no_events_popup(stdscr, "No ERROR events found.")
+                severity_filter = old_severity
+            else:
+                current_page = 0
+                selected_row = 0
+
+        # -----------------------------
+        # (2-2) 새로고침 (R 키)
+        # -----------------------------
+        elif key in (ord('r'), ord('R')):
+            stdscr.nodelay(True)
+            spinner_index = 0
+            result = {}
+            fetch_thread = threading.Thread(target=fetch_events, args=(connection, result))
+            fetch_thread.start()
+            while fetch_thread.is_alive():
+                stdscr.erase()
+                stdscr.addstr(1, 1, f"Loading events... {spinner_chars[spinner_index]}", curses.A_BOLD)
+                stdscr.refresh()
+                spinner_index = (spinner_index + 1) % len(spinner_chars)
+                time.sleep(0.1)
+            fetch_thread.join()
+            stdscr.nodelay(False)
+            if 'error' in result:
+                stdscr.erase()
+                stdscr.addstr(1, 1, f"Failed to fetch Events: {result['error']}")
+                stdscr.refresh()
+                stdscr.getch()
+            else:
+                events = result.get('events', [])
+                # 필터 캐시 초기화
+                last_filter_query = None
+                last_severity_filter = None
+                cached_filtered_events = events
+                current_page = 0
+                selected_row = 0
+
+        # -----------------------------
+        # (2-3) Enter: 상세보기
+        # -----------------------------
+        elif key == 10:
+            if len(filtered_events) != 0:
+                start_idx = current_page * rows_per_page
+                current_page_events = filtered_events[start_idx:start_idx + rows_per_page]
+                if 0 <= selected_row < len(current_page_events):
+                    selected_event = current_page_events[selected_row]
+                    show_event_detail(stdscr, selected_event)
+
+        # -----------------------------
+        # (2-4) 종료/뒤로가기
+        # -----------------------------
+        elif key in (ord('q'), ord('Q')):
+            import sys
+            sys.exit(0)
+        elif key == 27:  # ESC
+            break
 
 # =============================================================================
-# Section 13: Main Execution Block
+# Section 14: Main Execution Block
 # =============================================================================
 
 if __name__ == "__main__":
-    # FQDN 및 IP 주소 획득
+    # 설정 파일에서 FQDN(Fully Qualified Domain Name)을 가져옴
     fqdn = get_fqdn_from_config()
+    
+    # FQDN을 기반으로 IP 주소를 가져옴
     ip = get_ip_from_hosts(fqdn)
-    # 포트 443에 대해 IP 연결 체크 (엔진 기동 여부)
+    
+    # IP가 네트워크에서 접근 가능한지 확인
     if not check_ip_reachable(ip):
-        print("엔진이 기동중이 않음. (Engine is not running)")
-        sys.exit(1)
+        print("Engine is not running")
+        sys.exit(1)  # 실행 종료
+    
+    # oVirt API 엔드포인트 URL 설정
     url = f"https://{ip}/ovirt-engine/api"
+    
     print(f"RutilVM {fqdn}({ip})")
+    
+    # 기존 세션 정보를 로드 (이미 로그인된 상태인지 확인)
     session_data = load_session()
+    
+    # 기존 세션이 존재하고, URL이 일치하면 저장된 사용자 정보 사용
     if session_data and session_data["url"] == url:
         username = session_data["username"]
         password = session_data["password"]
     else:
-        max_attempts = 2
+        max_attempts = 2  # 로그인 최대 시도 횟수 설정
         for attempt in range(max_attempts):
             try:
                 if attempt == 0:
+                    # 사용자에게 계정 정보를 입력받음
                     username = input("Enter username: ")
                     if "@" not in username:
-                        username += "@internal"
+                        username += "@internal"  # 기본 도메인 추가
                     password = getpass.getpass("Enter password: ")
                 else:
                     print("Permission denied, please try again.")
@@ -3491,36 +4543,46 @@ if __name__ == "__main__":
                     if "@" not in username:
                         username += "@internal"
                     password = getpass.getpass("Enter password: ")
+                
+                # oVirt API에 연결 시도
                 with Connection(
                     url=url,
                     username=username,
                     password=password,
-                    insecure=True
+                    insecure=True  # SSL 검증 비활성화 (보안 이슈 주의 필요)
                 ) as connection:
-                    connection.system_service().get()
-                break
+                    connection.system_service().get()  # 연결 확인
+                break  # 로그인 성공 시 루프 종료
             except Exception:
                 if attempt == max_attempts - 1:
+                    # 로그인 실패 시 오류 메시지 출력 후 프로그램 종료
                     print(
                         "Failed to connect: Error during SSO authentication access_denied.\n"
                         "Unable to log in. Verify your login information or contact the system administrator."
                     )
                     sys.exit(1)
+        
+        # 로그인 성공 후 세션 저장
         save_session(username, password, url)
+    
     try:
+        # oVirt API에 다시 연결 시도
         with Connection(
             url=url,
             username=username,
             password=password,
             insecure=True
         ) as connection:
-            connection.system_service().get()
-            delete_session_on_exit = True
+            connection.system_service().get()  # 연결 확인
+            delete_session_on_exit = True  # 종료 시 세션 삭제 여부 설정
+            
+            # curses 라이브러리를 사용하여 텍스트 기반 UI 실행
             curses.wrapper(main_menu, connection)
     except Exception as e:
         msg = str(e).lower()
+        # 네트워크 관련 오류 메시지 처리
         if "no route" in msg or "failed to connect to" in msg:
             print("Engine is not running")
         else:
             print(f"Failed to connect: {e}")
-        sys.exit(1)
+        sys.exit(1)  # 오류 발생 시 프로그램 종료
